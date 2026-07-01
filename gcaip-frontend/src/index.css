@@ -1,0 +1,31 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html, body, #root {
+    height: 100%;
+    margin: 0;
+  }
+  ::selection {
+    background: theme('colors.sentinel');
+    color: white;
+  }
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: theme('colors.panel-light') transparent;
+  }
+}
+
+@layer components {
+  .glass-panel {
+    @apply bg-panel/80 backdrop-blur-xl border border-white/5 rounded-2xl;
+  }
+  .signal-dot {
+    @apply inline-block w-2 h-2 rounded-full;
+  }
+}
+
+.maplibregl-ctrl-attrib {
+  display: none !important;
+}

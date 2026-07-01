@@ -1,0 +1,38 @@
+# Root gitignore for GCAIP project
+
+# Virtual Environment
+/venv/
+/.venv/
+ENV/
+env/
+
+# Package dependencies
+node_modules/
+dist/
+/gcaip-frontend/node_modules/
+/gcaip-frontend/dist/
+
+# Environment and sensitive keys
+.env
+.env.*
+!*.example
+credentials/
+*.json
+!package.json
+!tsconfig.json
+!tsconfig.node.json
+!vite.config.ts
+
+# Python caches and logs
+__pycache__/
+*.py[cod]
+*$py.class
+*.log
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# OS specific files
+.DS_Store
+Thumbs.db
+desktop.ini
