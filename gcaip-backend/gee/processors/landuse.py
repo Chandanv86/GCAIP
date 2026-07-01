@@ -66,16 +66,29 @@ class LandUseProcessor(BaseThemeProcessor):
     ) -> ThemeResult:
         end = date.fromisoformat(end_date)
 
-        # ── Current: Dynamic World 10-day majority composite ─────────────────
-        dw_current = (
-            ee.ImageCollection("GOOGLE/DYNAMICWORLD/V1")
-            .filterBounds(aoi)
-            .filterDate(start_date, end_date)
-            .select("label")
-        )
-        dw_count = dw_current.size().getInfo()
-        if dw_count == 0:
-            raise gee_client.GEEAssetNotFoundError("No Dynamic World images found")
+        # ── Current: Dynamic World — expand window progressively if needed ────
+        dw_current = None
+        dw_count = 0
+        dw_window_days = 30  # start with the default 30-day window
+
+        for window in [30, 90, 180]:
+            dw_start = (end - timedelta(days=window)).isoformat()
+            dw_col = (
+                ee.ImageCollection("GOOGLE/DYNAMICWORLD/V1")
+                .filterBounds(aoi)
+                .filterDate(dw_start, end_date)
+                .select("label")
+            )
+            dw_count = dw_col.size().getInfo()
+            if dw_count > 0:
+                dw_current = dw_col
+                dw_window_days = window
+                break
+
+        if dw_current is None or dw_count == 0:
+            raise gee_client.GEEAssetNotFoundError(
+                f"No Dynamic World images found for any window up to 180 days before {end_date}"
+            )
 
         # Majority class composite
         current_label = dw_current.mode().rename("current_class")
@@ -116,7 +129,7 @@ class LandUseProcessor(BaseThemeProcessor):
         tree_to_crops_ha = area_ha(tree_to_crops)
         wetland_to_bare_ha = area_ha(wetland_to_bare)
         total_natural_to_built = area_ha(natural_to_built)
-        changed_area_ha = tree_to_built_ha + tree_to_crops_ha + wetland_to_bare_ha
+        dw_changed_area_ha = tree_to_built_ha + tree_to_crops_ha + wetland_to_bare_ha
 
         # ── Hansen GFW forest loss layer ──────────────────────────────────────
         try:
@@ -136,9 +149,13 @@ class LandUseProcessor(BaseThemeProcessor):
             log.warning("landuse.hansen_error", error=str(gfw_exc))
             deforestation_ha = 0.0
 
+        # Total changed area = DW transitions + Hansen deforestation (avoid double-counting)
+        # Hansen captures forest loss that DW may miss (different spatial/temporal resolution)
+        changed_area_ha = dw_changed_area_ha + max(0.0, deforestation_ha - tree_to_crops_ha)
+
         # ── Runoff coefficient change (USDA CN-based) ─────────────────────────
         # Rough estimate: tree→built increases CN by ~40 units → runoff ↑ ~17%
-        # Scaled by proportion of changed area
+        # Include deforestation in runoff impact (cleared forest increases runoff)
         aoi_area_stats = gee_client.get_stats(
             image=ee.Image.pixelArea().divide(10000).rename("area"),
             aoi=aoi, scale=100, reducer=ee.Reducer.sum(),
@@ -147,12 +164,22 @@ class LandUseProcessor(BaseThemeProcessor):
         runoff_increase_pct = (
             (tree_to_built_ha / aoi_area_ha) * 40.0  # 40% runoff increase per deforested ha→built
             + (tree_to_crops_ha / aoi_area_ha) * 15.0  # crops less impervious
+            + (deforestation_ha / aoi_area_ha) * 20.0  # general forest loss → runoff
         )
 
         # ── Tile URL: current Dynamic World label ─────────────────────────────
         tile_url, expires_at = gee_client.get_tile_url(current_label, VIS_LANDUSE)
 
         anomaly_score = min(100.0, changed_area_ha / max(aoi_area_ha, 1) * 1000)
+
+        log.info(
+            "landuse.computed",
+            dw_window_days=dw_window_days,
+            dw_scene_count=dw_count,
+            dw_changed_ha=round(dw_changed_area_ha, 1),
+            hansen_deforestation_ha=round(deforestation_ha, 1),
+            total_changed_ha=round(changed_area_ha, 1),
+        )
 
         return ThemeResult(
             theme=self.THEME_NAME,
@@ -171,17 +198,18 @@ class LandUseProcessor(BaseThemeProcessor):
                     "natural_to_built_ha": round(total_natural_to_built, 1),
                 },
                 "deforestation_ha": round(deforestation_ha, 1),
-                "urban_expansion_ha": round(tree_to_built_ha, 1),
+                "urban_expansion_ha": round(total_natural_to_built, 1),
                 "runoff_increase_pct": round(runoff_increase_pct, 1),
                 "catchment_impact": (
                     f"Runoff increased ~{runoff_increase_pct:.0f}%, sediment load elevated"
                     if runoff_increase_pct > 5 else "Minimal catchment impact"
                 ),
                 "dw_scene_count": dw_count,
+                "dw_window_days": dw_window_days,
             },
             anomaly_score=round(anomaly_score, 1),
             confidence=round(confidence, 2),
             data_age_hours=24.0,  # Dynamic World near-daily
-            data_source=f"Dynamic World V1 + ESA WorldCover v200 (2021 baseline) + Hansen GFW v1.11 (loss through 2023), {end_date}",
+            data_source=f"Dynamic World V1 ({dw_window_days}d window) + ESA WorldCover v200 (2021 baseline) + Hansen GFW v1.11 (loss through 2023), {end_date}",
             error=None,
         )

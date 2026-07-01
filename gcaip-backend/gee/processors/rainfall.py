@@ -1,8 +1,8 @@
 """
 GCAIP Theme 2 — Rainfall Anomaly Processor
 
-Algorithm: GPM IMERG accumulation vs CHIRPS 1981-2020 climatology
-Data: NASA/GPM_L3/IMERG_V06 + UCSB-CHC/CHIRPS/DAILY
+Algorithm: GPM IMERG accumulation vs CHIRPS 1991-2020 climatology
+Data: NASA/GPM_L3/IMERG_V07 (fallback V06 / ERA5-Land) + UCSB-CHG/CHIRPS/DAILY
 
 Outputs SPI (Standardized Precipitation Index) at 7-day and 30-day timescales.
 Identifies flash-flood risk from high-intensity 30-min IMERG rates.
@@ -143,7 +143,7 @@ class RainfallProcessor(BaseThemeProcessor):
             max_rate_mm_hr = 0.0
         flash_flood_risk = max_rate_mm_hr > 50.0  # IMERG 50mm/hr → flash flood
 
-        # ── CHIRPS climatology (1981-2020 baseline) ───────────────────────────
+        # ── CHIRPS climatology (1991-2020 baseline) ───────────────────────────
         # CHIRPS daily: 0.05° resolution, better for 30-day accumulations
         chirps = ee.ImageCollection("UCSB-CHG/CHIRPS/DAILY")
         clim_7d = self._chirps_climatology(chirps, aoi, end, days=7)
@@ -180,8 +180,10 @@ class RainfallProcessor(BaseThemeProcessor):
         else:
             tile_url, expires_at = None, None
 
-        # Confidence: IMERG is near-real-time with ~3hr latency, high confidence
-        confidence = 0.85 if accum_7d > 0 else 0.5
+        # Confidence: graduated scale based on data source + scene coverage
+        confidence = self._compute_confidence(
+            precip_source, precip_scene_count, accum_7d
+        )
 
         # Anomaly score: |SPI| normalized to 0-100
         anomaly_score = min(100.0, abs(spi_7) / 3.0 * 100.0)
@@ -224,7 +226,7 @@ class RainfallProcessor(BaseThemeProcessor):
             anomaly_score=round(anomaly_score, 1),
             confidence=round(confidence, 2),
             data_age_hours=actual_data_age_hours,
-            data_source=f"{precip_source} (NRT) + CHIRPS 1981-2020 baseline, {end_date}",
+            data_source=f"{precip_source} (NRT) + CHIRPS 1991-2020 baseline, {end_date}",
             error=None,
         )
 
@@ -287,6 +289,33 @@ class RainfallProcessor(BaseThemeProcessor):
             "std": max(std_val, mean_val * 0.2, 1.0),  # minimum 20% of mean
             "scene_count": scene_count,
         }
+
+    @staticmethod
+    def _compute_confidence(
+        precip_source: str, scene_count: int, accum_7d: float
+    ) -> float:
+        """Graduated confidence based on data source quality and scene count."""
+        # Base confidence by source tier
+        if "V07" in precip_source:
+            base = 0.85
+        elif "V06" in precip_source:
+            base = 0.75
+        elif "ERA5" in precip_source:
+            base = 0.65
+        else:
+            return 0.4  # no data at all
+
+        # Penalise low scene count (< 5 scenes in 7-day window is sparse)
+        if scene_count < 5:
+            base -= 0.10
+        elif scene_count < 10:
+            base -= 0.05
+
+        # Small bonus when there IS measured rainfall (confirms sensor active)
+        if accum_7d > 0:
+            base += 0.05
+
+        return round(min(max(base, 0.4), 1.0), 2)
 
     @staticmethod
     def _spi_label(spi: float) -> str:
