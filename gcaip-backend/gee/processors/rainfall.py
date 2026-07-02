@@ -1,8 +1,8 @@
 """
 GCAIP Theme 2 — Rainfall Anomaly Processor
 
-Algorithm: GPM IMERG accumulation vs CHIRPS 1991-2020 climatology
-Data: NASA/GPM_L3/IMERG_V07 (fallback V06 / ERA5-Land) + UCSB-CHG/CHIRPS/DAILY
+Algorithm: GPM IMERG accumulation vs CHIRPS 1981-2020 climatology
+Data: NASA/GPM_L3/IMERG_V06 + UCSB-CHC/CHIRPS/DAILY
 
 Outputs SPI (Standardized Precipitation Index) at 7-day and 30-day timescales.
 Identifies flash-flood risk from high-intensity 30-min IMERG rates.
@@ -54,7 +54,7 @@ class RainfallProcessor(BaseThemeProcessor):
         self, aoi: "ee.Geometry", start: str, end: str
     ) -> tuple["ee.ImageCollection", str]:
         """
-        Try IMERG V07 first, fall back to V06, then ERA5-Land.
+        Try IMERG V07 first, fall back to V06, then ERA5-Land, then GSMaP v8.
         Returns (collection, source_name).
         """
         # Try IMERG V07 (most current on GEE, updated ~4hr lag)
@@ -89,7 +89,19 @@ class RainfallProcessor(BaseThemeProcessor):
         if era5.size().getInfo() > 0:
             return era5, "ERA5-Land (ECMWF)"
 
+        # JAXA GSMaP v8 — free, ~4hr NRT latency, 0.1° resolution
+        gsmap = (
+            ee.ImageCollection("JAXA/GPM_L3/GSMaP/v8/operational")
+            .filterBounds(aoi)
+            .filterDate(start, end)
+            .select("hourlyPrecipRateGC")
+            .map(lambda img: img.rename("precipitation"))
+        )
+        if gsmap.size().getInfo() > 0:
+            return gsmap, "GSMaP v8 (JAXA)"
+
         return ee.ImageCollection([]), "none"
+
 
     def _run_gee_analysis(
         self, aoi: "ee.Geometry", start_date: str, end_date: str
@@ -101,13 +113,43 @@ class RainfallProcessor(BaseThemeProcessor):
         # ── GPM IMERG / Fallbacks: accumulate precipitation ──────────────────
         imerg, precip_source = self._get_precip_collection(aoi, start_30d, end_date)
 
+        # ── Auto-date-shift: if data is stale, adjust window to latest data ──
+        date_shifted = False
+        if precip_source != "none":
+            try:
+                latest = imerg.sort("system:time_start", False).first()
+                latest_ts = latest.get("system:time_start").getInfo()
+                if latest_ts:
+                    latest_dt = datetime.fromtimestamp(latest_ts / 1000, tz=timezone.utc)
+                    data_end = latest_dt.date()
+                    gap_days = (end - data_end).days
+                    if gap_days > 3:
+                        log.warning(
+                            "rainfall.data_stale",
+                            gap_days=gap_days,
+                            requested_end=end_date,
+                            data_available_to=data_end.isoformat(),
+                            source=precip_source,
+                        )
+                        # Shift analysis window to match actual data availability
+                        end = data_end
+                        end_date = end.isoformat()
+                        start_7d = (end - timedelta(days=7)).isoformat()
+                        start_30d = (end - timedelta(days=30)).isoformat()
+                        date_shifted = True
+            except Exception as shift_exc:
+                log.warning("rainfall.date_shift_error", error=str(shift_exc))
+
         def accum_mm(start: str, stop: str) -> float:
             col = imerg.filterDate(start, stop)
             if col.size().getInfo() == 0:
                 return 0.0
-            # IMERG: mm/hr × 0.5hr per 30min step = mm
+            # IMERG/GSMaP: mm/hr × 0.5hr per 30min step = mm
             # ERA5: already in mm after *1000 conversion
-            multiplier = 0.5 if "IMERG" in precip_source else 1.0
+            if "IMERG" in precip_source or "GSMaP" in precip_source:
+                multiplier = 0.5
+            else:
+                multiplier = 1.0
             total = col.map(lambda img: img.multiply(multiplier)).sum()
             stats = gee_client.get_stats(
                 image=total, aoi=aoi, scale=11000, reducer=ee.Reducer.mean()
@@ -120,7 +162,7 @@ class RainfallProcessor(BaseThemeProcessor):
             (end - timedelta(days=1)).isoformat(), end_date
         )
 
-        # Bug 3 Guard: Minimum precipitation threshold guard
+        # Guard: fail if no data at all (even after date shift)
         precip_scene_count = imerg.filterDate(start_7d, end_date).size().getInfo()
         if accum_7d == 0.0 and accum_30d == 0.0 and precip_scene_count == 0:
             raise gee_client.GEEAssetNotFoundError(
@@ -143,7 +185,7 @@ class RainfallProcessor(BaseThemeProcessor):
             max_rate_mm_hr = 0.0
         flash_flood_risk = max_rate_mm_hr > 50.0  # IMERG 50mm/hr → flash flood
 
-        # ── CHIRPS climatology (1991-2020 baseline) ───────────────────────────
+        # ── CHIRPS climatology (1981-2020 baseline) ───────────────────────────
         # CHIRPS daily: 0.05° resolution, better for 30-day accumulations
         chirps = ee.ImageCollection("UCSB-CHG/CHIRPS/DAILY")
         clim_7d = self._chirps_climatology(chirps, aoi, end, days=7)
@@ -180,10 +222,19 @@ class RainfallProcessor(BaseThemeProcessor):
         else:
             tile_url, expires_at = None, None
 
-        # Confidence: graduated scale based on data source + scene coverage
-        confidence = self._compute_confidence(
-            precip_source, precip_scene_count, accum_7d
-        )
+        # Confidence: based on actual data availability (scene count), not rainfall amount.
+        # A genuinely dry region with full IMERG coverage should still have high confidence.
+        scene_count_7d = imerg.filterDate(start_7d, end_date).size().getInfo()
+        if scene_count_7d >= 48 * 5:       # IMERG has ~48 images/day, 5+ days = good coverage
+            confidence = 0.90
+        elif scene_count_7d >= 48 * 2:     # 2+ days
+            confidence = 0.75
+        elif scene_count_7d > 0:           # Some data
+            confidence = 0.60
+        else:
+            confidence = 0.35              # No satellite observations at all
+        if date_shifted:
+            confidence = max(0.35, confidence - 0.10)  # Penalize for stale data
 
         # Anomaly score: |SPI| normalized to 0-100
         anomaly_score = min(100.0, abs(spi_7) / 3.0 * 100.0)
@@ -226,7 +277,7 @@ class RainfallProcessor(BaseThemeProcessor):
             anomaly_score=round(anomaly_score, 1),
             confidence=round(confidence, 2),
             data_age_hours=actual_data_age_hours,
-            data_source=f"{precip_source} (NRT) + CHIRPS 1991-2020 baseline, {end_date}",
+            data_source=f"{precip_source} (NRT) + CHIRPS 1981-2020 baseline, {end_date}",
             error=None,
         )
 
@@ -289,33 +340,6 @@ class RainfallProcessor(BaseThemeProcessor):
             "std": max(std_val, mean_val * 0.2, 1.0),  # minimum 20% of mean
             "scene_count": scene_count,
         }
-
-    @staticmethod
-    def _compute_confidence(
-        precip_source: str, scene_count: int, accum_7d: float
-    ) -> float:
-        """Graduated confidence based on data source quality and scene count."""
-        # Base confidence by source tier
-        if "V07" in precip_source:
-            base = 0.85
-        elif "V06" in precip_source:
-            base = 0.75
-        elif "ERA5" in precip_source:
-            base = 0.65
-        else:
-            return 0.4  # no data at all
-
-        # Penalise low scene count (< 5 scenes in 7-day window is sparse)
-        if scene_count < 5:
-            base -= 0.10
-        elif scene_count < 10:
-            base -= 0.05
-
-        # Small bonus when there IS measured rainfall (confirms sensor active)
-        if accum_7d > 0:
-            base += 0.05
-
-        return round(min(max(base, 0.4), 1.0), 2)
 
     @staticmethod
     def _spi_label(spi: float) -> str:

@@ -1,6 +1,5 @@
 import type { ThemeResult } from '@/types/theme'
 import type { PresetZone } from '@/data/presetZones'
-import { getSeasonalRainfall, getCurrentQuarter } from '@/data/presetZones'
 
 interface Props {
   preset: PresetZone
@@ -36,10 +35,9 @@ export default function ValidationPanel({ preset, themeResults }: Props) {
     return 'MISMATCH'
   }
 
-  // Resolve season-aware expected ranges for rainfall
-  const currentQuarter = getCurrentQuarter()
+  // Gather Rainfall Rows
   const rainfallRows: RowData[] = []
-  const expectedRain = getSeasonalRainfall(preset.expected.rainfall)
+  const expectedRain = preset.expected.rainfall
 
   if (rainfallResult) {
     const stats = rainfallResult.stats || {}
@@ -272,7 +270,7 @@ export default function ValidationPanel({ preset, themeResults }: Props) {
         </div>
 
         <p className="text-[10px] text-muted leading-normal leading-relaxed pt-1 border-t border-white/[0.02]">
-          💡 Season: <span className="font-semibold text-cyan-400">{currentQuarter}</span> — Expected ranges are adjusted for the current quarter. Thresholds change with monsoon/dry season cycles.
+          💡 Note: Expected ranges are based on annual averages. Seasonal timing affects results — Amazon dry season (Jun-Sept) will show lower rainfall than annual expected range.
         </p>
       </div>
     </div>

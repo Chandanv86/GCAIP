@@ -20,23 +20,23 @@ gcaip-frontend/     React 18 + TypeScript + MapLibre GL JS globe + SSE
 
 ## Build Status
 
-- [x] docker-compose.yml (PostgreSQL+PostGIS+TimescaleDB + Redis)
-- [x] Database migrations (Alembic) — all 5 tables + TimescaleDB hypertable
-- [x] GEE authentication (`gee/client.py`)
-- [x] All 7 GEE processors (flood, rainfall, reservoir, mangrove, erosion, vegetation, landuse)
-- [x] Celery app + theme tasks (parallel dispatch, one task per theme)
-- [x] AOI endpoint (POST /api/v1/aoi)
-- [x] Analyze endpoint (POST /api/v1/analyze)
-- [x] SSE stream endpoint (GET /api/v1/analyze/{run_id}/stream)
-- [x] Enrichment service (WorldPop + OSM Overpass)
-- [x] Risk score engine (5-component weighted composite)
-- [x] Cross-theme correlation engine (6 compound-risk rules)
-- [x] Alert engine + threshold evaluation
-- [x] Frontend: Globe + click-to-AOI + polygon draw
-- [x] Frontend: SSE loader + progressive theme cards
-- [x] Frontend: GEE tile overlays on map
-- [x] Alert dispatch (Celery Beat scheduled re-analysis + SendGrid)
-- [x] PDF report generator (WeasyPrint)
+- [X] docker-compose.yml (PostgreSQL+PostGIS+TimescaleDB + Redis)
+- [X] Database migrations (Alembic) — all 5 tables + TimescaleDB hypertable
+- [X] GEE authentication (`gee/client.py`)
+- [X] All 7 GEE processors (flood, rainfall, reservoir, mangrove, erosion, vegetation, landuse)
+- [X] Celery app + theme tasks (parallel dispatch, one task per theme)
+- [X] AOI endpoint (POST /api/v1/aoi)
+- [X] Analyze endpoint (POST /api/v1/analyze)
+- [X] SSE stream endpoint (GET /api/v1/analyze/{run_id}/stream)
+- [X] Enrichment service (WorldPop + OSM Overpass)
+- [X] Risk score engine (5-component weighted composite)
+- [X] Cross-theme correlation engine (6 compound-risk rules)
+- [X] Alert engine + threshold evaluation
+- [X] Frontend: Globe + click-to-AOI + polygon draw
+- [X] Frontend: SSE loader + progressive theme cards
+- [X] Frontend: GEE tile overlays on map
+- [X] Alert dispatch (Celery Beat scheduled re-analysis + SendGrid)
+- [X] PDF report generator (WeasyPrint)
 
 ## ⚠️ Action Required Before Production
 
@@ -47,19 +47,16 @@ gcaip-frontend/     React 18 + TypeScript + MapLibre GL JS globe + SSE
    before. If wrong, the mangrove processor will fail gracefully (caught
    exception → `gain_ha`/`loss_ha` = 0, `gmw_baseline_used: false`) but you
    lose the baseline comparison.
-
 2. **GEE service account** — create one at
    https://developers.google.com/earth-engine/guides/service_account,
    download the JSON key to `gcaip-backend/credentials/gee-service-account.json`,
    set `GEE_SERVICE_ACCOUNT` in `.env`.
-
 3. **WorldPop REST endpoint** — the exact REST query shape in
    `integrations/worldpop.py._fetch_rest()` is a best-effort implementation
    against WorldPop's documented API surface. It has a GEE raster fallback
    (`WorldPop/GP/100m/pop`) that will work regardless, so enrichment never
    hard-fails, but verify the REST path against current WorldPop docs for
    best latency.
-
 4. **Overpass API rate limits** — the public `overpass-api.de` instance
    throttles aggressively under load. For production scale, run your own
    Overpass instance or use a paid provider (e.g., Geofabrik extracts +
@@ -68,7 +65,9 @@ gcaip-frontend/     React 18 + TypeScript + MapLibre GL JS globe + SSE
 ## Quick Start
 
 ### 1. Prerequisites
+
 Ensure you have the following installed on your system:
+
 - **Docker & Docker Compose**
 - **Python 3.11+** (if running locally)
 - **Node.js 18+ & npm** (if running frontend locally)
@@ -76,7 +75,9 @@ Ensure you have the following installed on your system:
 ---
 
 ### 2. Google Earth Engine (GEE) Credentials
+
 To enable satellite processing, you must configure a GEE service account:
+
 1. Download your service account JSON key and place it inside `gcaip-backend/credentials/`.
 2. Ensure the filename matches `africa-analysis45678-89989fd43a20.json` (or update it in `.env` and `docker-compose.yml` to match your custom filename).
 3. Open `gcaip-backend/.env` and update the GEE variables:
@@ -91,12 +92,14 @@ To enable satellite processing, you must configure a GEE service account:
 ### 3. How to Run (Choose Option A or Option B)
 
 #### Option A: Full Docker Compose Mode (Easiest)
+
 This runs the entire backend suite (PostgreSQL/TimescaleDB, Redis, FastAPI, Celery Worker, and Celery Beat) in Docker.
 
 1. Navigate to the backend directory and run:
    ```bash
    cd gcaip-backend
-   docker compose up --build -d
+   $env:PYTHONDONTWRITEBYTECODE=1
+   uvicorn main:app --reload --port 8000
    ```
 2. Check logs to verify service initialization:
    ```bash
@@ -106,38 +109,42 @@ This runs the entire backend suite (PostgreSQL/TimescaleDB, Redis, FastAPI, Cele
 ---
 
 #### Option B: Hybrid Mode (Fast local python execution + DB/Redis in Docker)
+
 Best for active backend code changes and debugging.
 
 1. **Start Database and Redis containers**:
+
    ```bash
    cd gcaip-backend
    docker compose up -d db redis
    ```
-
 2. **Run database migrations**:
+
    ```bash
    # Ensure your virtual environment is active in your terminal
    # On Windows: venv\Scripts\activate
    # On Unix/macOS: source venv/bin/activate
    alembic upgrade head
    ```
-
 3. **Start the FastAPI server**:
+
    ```bash
    uvicorn main:app --reload --port 8000
    ```
-
 4. **Start the Celery worker** (in a separate terminal with venv active):
+
    - **On Windows** (requires `-P solo` to prevent `WinError 5` permission errors):
      ```bash
+     cd gcaip-backend
+     $env:PYTHONDONTWRITEBYTECODE=1
      celery -A workers.celery_app worker --loglevel=info -P solo -Q default,gee_tasks,enrichment_tasks,alert_tasks
      ```
    - **On macOS/Linux**:
      ```bash
      celery -A workers.celery_app worker --loglevel=info --concurrency=2 -Q default,gee_tasks,enrichment_tasks,alert_tasks
      ```
-
 5. **Start Celery Beat** (only needed for scheduled alerts, in a separate terminal with venv active):
+
    ```bash
    celery -A workers.celery_app beat --loglevel=info
    ```
@@ -145,6 +152,7 @@ Best for active backend code changes and debugging.
 ---
 
 ### 4. Running the Frontend
+
 Your frontend is served by Vite on port `5173`.
 
 1. Navigate to the frontend directory and install dependencies:
@@ -160,6 +168,7 @@ Your frontend is served by Vite on port `5173`.
 ---
 
 ### 5. Verification & Access URLs
+
 - **Web App UI**: [http://localhost:5173](http://localhost:5173)
 - **API Swagger Documentation**: [http://localhost:8000/docs](http://localhost:8000/docs)
 - **System Health Status Check**: [http://localhost:8000/api/v1/health](http://localhost:8000/api/v1/health) (verifies database, Redis, and GEE credentials validation)
@@ -167,8 +176,7 @@ Your frontend is served by Vite on port `5173`.
 ## Non-Negotiables Implemented
 
 1. **GEE is the EO engine** — zero GDAL pipelines, zero raw imagery downloads.
-   `gee/client.py` is the single GEE entry point; `backend never downloads
-   raw imagery` is enforced by design (only `getMapId()` tile URLs and
+   `gee/client.py` is the single GEE entry point; `backend never downloads raw imagery` is enforced by design (only `getMapId()` tile URLs and
    `reduceRegion()` stats cross the GEE boundary).
 2. **SAR first** — flood, reservoir, and erosion processors use Sentinel-1
    GRD as primary; Sentinel-2 (vegetation, mangrove, landuse) explicitly
@@ -201,3 +209,4 @@ Your frontend is served by Vite on port `5173`.
   flood-risk signal alongside SAR.
 - User authentication is stubbed (`models/user.py` exists, no auth routes
   yet) — AOIs are currently anonymous/public.
+

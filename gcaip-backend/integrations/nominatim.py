@@ -16,7 +16,7 @@ async def reverse_geocode(lat: float, lon: float) -> dict:
         "addressdetails": 1,
     }
     headers = {"User-Agent": "GCAIP/1.0 (contact@gcaip.io)"}
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    async with httpx.AsyncClient(timeout=2.0) as client:
         resp = await client.get(url, params=params, headers=headers)
         resp.raise_for_status()
         data = resp.json()
