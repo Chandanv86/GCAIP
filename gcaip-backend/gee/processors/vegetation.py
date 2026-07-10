@@ -140,7 +140,7 @@ class VegetationProcessor(BaseThemeProcessor):
             ndvi_diff = float(diff_stats.get("diff", 0) or 0)
             dieback_flag = ndvi_diff < -0.15
 
-        tile_url, expires_at = gee_client.get_tile_url(current_ndvi, VIS_VEGETATION)
+        tile_url, expires_at = gee_client.get_tile_url(current_ndvi.clip(aoi), VIS_VEGETATION)
         anomaly_score = min(100.0, abs(ndvi_z) / 3.0 * 100.0)
         confidence = min(1.0, 0.5 + len(clim_ndvi_values) * 0.1)
 

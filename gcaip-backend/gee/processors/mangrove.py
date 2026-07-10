@@ -163,7 +163,7 @@ class MangroveProcessor(BaseThemeProcessor):
         vis_img = current_mangrove.unmask(0)
         if has_gmw:
             vis_img = vis_img.where(gain.unmask(0), 2)
-        tile_url, expires_at = gee_client.get_tile_url(vis_img, VIS_MANGROVE)
+        tile_url, expires_at = gee_client.get_tile_url(vis_img.clip(aoi), VIS_MANGROVE)
 
         anomaly_score = min(100.0, abs(net_change_ha) / max(total_ha, 1) * 200)
 

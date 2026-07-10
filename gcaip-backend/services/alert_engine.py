@@ -52,6 +52,46 @@ THRESHOLDS = {
         "message_tpl": "SPI-7 = {spi_7:.1f} (Extremely Wet). Flash flood risk elevated.",
         "confidence_min": 0.7,
     },
+    "effluent_plume_detected": {
+        "condition": lambda s: s.get("plume_extent_km2", 0) >= 0.5,
+        "severity": "WATCH",
+        "alert_type": "effluent_plume_detected",
+        "title_tpl": "EFFLUENT DISCHARGE PLUME: {aoi_name}",
+        "message_tpl": "Wastewater/industrial effluent discharge plume of {plume_extent_km2:.1f} km² detected.",
+        "confidence_min": 0.6,
+    },
+    "thermal_plume_active": {
+        "condition": lambda s: s.get("thermal_plume_flag", False) is True,
+        "severity": "WATCH",
+        "alert_type": "thermal_plume_active",
+        "title_tpl": "THERMAL DISCHARGE PLUME: {aoi_name}",
+        "message_tpl": "SST anomaly of +{delta_sst_c:.1f}°C detected at outfall, thermal plume active.",
+        "confidence_min": 0.6,
+    },
+    "spm_spike": {
+        "condition": lambda s: s.get("spm_mean", 0) >= 20.0,
+        "severity": "WATCH",
+        "alert_type": "spm_spike",
+        "title_tpl": "OUTFALL TURBIDITY SPIKE: {aoi_name}",
+        "message_tpl": "Suspended particulate matter (SPM) at coastal outfall reached {spm_mean:.1f} mg/L.",
+        "confidence_min": 0.6,
+    },
+    "corridor_encroachment": {
+        "condition": lambda s: s.get("encroachment_ha", 0) >= 5.0,
+        "severity": "WARNING",
+        "alert_type": "corridor_encroachment",
+        "title_tpl": "PIPELINE CORRIDOR ENCROACHMENT: {aoi_name}",
+        "message_tpl": "Potential unauthorized encroachment of {encroachment_ha:.1f} ha detected inside pipeline corridor.",
+        "confidence_min": 0.7,
+    },
+    "corridor_disturbance": {
+        "condition": lambda s: s.get("disturbed_corridor_length_m", 0) >= 5000.0,
+        "severity": "WATCH",
+        "alert_type": "corridor_disturbance",
+        "title_tpl": "PIPELINE CORRIDOR DISTURBANCE: {aoi_name}",
+        "message_tpl": "Pipeline corridor disturbed length has reached {disturbed_corridor_length_m:.0f} meters.",
+        "confidence_min": 0.6,
+    },
 }
 
 
@@ -80,12 +120,18 @@ class AlertEngine:
 
         aoi = session.query(AOI).filter_by(id=aoi_id).first()
         aoi_name = aoi.name or aoi_id if aoi else aoi_id
-        today = date.today().isoformat()
+        # P7 fix: use UTC date for dedup_key to avoid timezone-drift duplicates near midnight.
+        # Previously used date.today() (local server time), which could differ from the
+        # UTC timestamps on alert records, causing duplicates at midnight boundaries.
+        today_utc = datetime.now(timezone.utc).date().isoformat()
         created = []
 
         # Map theme → applicable rules (only active themes)
         theme_rule_map = {
             "rainfall": ["extreme_rainfall"],
+            "effluent_plume": ["effluent_plume_detected"],
+            "coastal_outfall": ["thermal_plume_active", "spm_spike"],
+            "pipeline_corridor": ["corridor_encroachment", "corridor_disturbance"],
             # Disabled themes — re-enable when themes are activated:
             # "flood": ["flood_active"],
             # "reservoir": ["spillway_risk"],
@@ -117,7 +163,7 @@ class AlertEngine:
                 if not triggered:
                     continue
 
-                dedup_key = f"{aoi_id}:{rule['alert_type']}:{today}"
+                dedup_key = f"{aoi_id}:{rule['alert_type']}:{today_utc}"
 
                 # Skip if already alerted today
                 existing = session.query(Alert).filter_by(dedup_key=dedup_key).first()

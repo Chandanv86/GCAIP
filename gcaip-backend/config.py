@@ -55,8 +55,17 @@ class Settings(BaseSettings):
     # --- Celery ---
     CELERY_BROKER_URL: str = "redis://localhost:6379/0"
     CELERY_RESULT_BACKEND: str = "redis://localhost:6379/1"
-    CELERY_TASK_SOFT_TIME_LIMIT: int = 180   # 3 min soft limit
-    CELERY_TASK_TIME_LIMIT: int = 240        # 4 min hard kill
+    # GEE worst-case budget per task:
+    #   safe_call retries up to GEE_MAX_RETRIES=3 attempts, each up to GEE_TIMEOUT_SECONDS=120s
+    #   plus exponential backoff: 1s + 2s + 4s = 7s between retries.
+    #   Per safe_call worst case: 120*3 + 7 = 367s.
+    #   A typical processor makes ~5-8 sequential safe_call invocations (stats + tile + fallback).
+    #   Conservative per-task ceiling: 8 × 367 = ~2936s.  Practically retries are rare;
+    #   600s soft / 720s hard covers the real p99 (2-3 sequential calls, rarely retried)
+    #   while leaving a clean SIGTERM window between soft and hard limits.
+    #   If you raise GEE_TIMEOUT_SECONDS or GEE_MAX_RETRIES, raise these proportionally.
+    CELERY_TASK_SOFT_TIME_LIMIT: int = 600   # 10 min — triggers SoftTimeLimitExceeded
+    CELERY_TASK_TIME_LIMIT: int = 720        # 12 min — hard SIGKILL after soft+grace
     CELERY_BEAT_SCHEDULE_INTERVAL: int = 3600  # 1h between scheduled runs
 
     # --- External APIs ---

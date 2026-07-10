@@ -19,6 +19,9 @@ interface AnalysisState {
   themeResults: Partial<Record<ThemeId, ThemeResult>>
   riskScore: RiskScore | null
 
+  // P3a: Pipeline vector reference data (independent of analysis state)
+  pipelineVectors: GeoJSON.FeatureCollection | null
+
   // UI state
   selectedTheme: ThemeId | null
   mapLayerVisible: Partial<Record<ThemeId, boolean>>
@@ -44,6 +47,7 @@ interface AnalysisState {
   setInteractionMode: (mode: 'navigate' | 'point' | 'rectangle') => void
   setSelectedPresetId: (id: string | null) => void
   setSelectedPreset: (preset: PresetZone | null) => void
+  setPipelineVectors: (vectors: GeoJSON.FeatureCollection | null) => void
   reset: () => void
 }
 
@@ -54,6 +58,7 @@ const initialState = {
   isAnalyzing: false,
   themeResults: {},
   riskScore: null,
+  pipelineVectors: null,
   selectedTheme: null,
   mapLayerVisible: {},
   error: null,
@@ -80,13 +85,19 @@ export const useAnalysisStore = create<AnalysisState>((set) => ({
     }),
 
   setThemeResult: (theme, result) =>
-    set((state) => ({
-      themeResults: { ...state.themeResults, [theme]: result },
-      mapLayerVisible: {
-        ...state.mapLayerVisible,
-        [theme]: state.mapLayerVisible[theme] ?? !result.error_message,
-      },
-    })),
+    set((state) => {
+      // Check if any layer is currently visible
+      const isAnyVisible = Object.values(state.mapLayerVisible).some(Boolean);
+      
+      return {
+        themeResults: { ...state.themeResults, [theme]: result },
+        mapLayerVisible: {
+          ...state.mapLayerVisible,
+          // Make visible ONLY if it's the first successful layer (no other layers are visible yet)
+          [theme]: state.mapLayerVisible[theme] ?? (!result.error_message && !isAnyVisible),
+        },
+      };
+    }),
 
   setRiskScore: (score) => set({ riskScore: score }),
 
@@ -119,6 +130,8 @@ export const useAnalysisStore = create<AnalysisState>((set) => ({
       selectedPresetId: preset?.id ?? null,
       selectedPresetZone: preset,
     }),
+
+  setPipelineVectors: (vectors) => set({ pipelineVectors: vectors }),
 
   reset: () => set(initialState),
 }))

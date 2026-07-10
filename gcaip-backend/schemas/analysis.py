@@ -5,7 +5,10 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-VALID_THEMES = ["rainfall", "landuse"]
+VALID_THEMES = [
+    "rainfall", "landuse",
+    "effluent_plume", "coastal_outfall", "pipeline_corridor",
+]
 
 
 class AnalyzeRequest(BaseModel):
@@ -53,6 +56,7 @@ class RunStatusResponse(BaseModel):
 
 class ThemeResultSchema(BaseModel):
     theme: str
+    result_id: uuid.UUID
     status: str
     tile_url: str | None
     tile_url_expires_at: datetime | None
@@ -67,6 +71,7 @@ class ThemeResultSchema(BaseModel):
     data_age_hours: float | None
     data_source: str | None
     error_message: str | None
+    error_class: str | None
 
     model_config = {"from_attributes": True}
 

@@ -67,19 +67,82 @@ class LandUseProcessor(BaseThemeProcessor):
         end = date.fromisoformat(end_date)
 
         # ── Current: Dynamic World 10-day majority composite ─────────────────
-        dw_current = (
-            ee.ImageCollection("GOOGLE/DYNAMICWORLD/V1")
-            .filterBounds(aoi)
-            .filterDate(start_date, end_date)
-            .select("label")
-        )
+        def _dw_col(s: str, e: str):
+            return (
+                ee.ImageCollection("GOOGLE/DYNAMICWORLD/V1")
+                .filterBounds(aoi)
+                .filterDate(s, e)
+                .select("label")
+            )
+
+        dw_current = _dw_col(start_date, end_date)
         dw_count = dw_current.size().getInfo()
+
         if dw_count == 0:
-            raise gee_client.GEEAssetNotFoundError("No Dynamic World images found")
+            # Widen +15 days
+            start_dt = date.fromisoformat(start_date)
+            w15_start = (start_dt - timedelta(days=15)).isoformat()
+            log.info("landuse.fallback_dw_widen_15d", start=w15_start, end=end_date)
+            dw_current = _dw_col(w15_start, end_date)
+            dw_count = dw_current.size().getInfo()
+
+            if dw_count == 0:
+                # Widen +30 days
+                w30_start = (start_dt - timedelta(days=30)).isoformat()
+                log.info("landuse.fallback_dw_widen_30d", start=w30_start, end=end_date)
+                dw_current = _dw_col(w30_start, end_date)
+                dw_count = dw_current.size().getInfo()
+
+                if dw_count == 0:
+                    # Widen +90 days — covers persistent cloud-cover seasons in
+                    # equatorial/tropical regions (Niger Delta, Congo, SE Asia)
+                    w90_start = (start_dt - timedelta(days=90)).isoformat()
+                    log.info("landuse.fallback_dw_widen_90d", start=w90_start, end=end_date)
+                    dw_current = _dw_col(w90_start, end_date)
+                    dw_count = dw_current.size().getInfo()
+
+                    if dw_count == 0:
+                        # All Dynamic World tiers exhausted: fall back to ESA WorldCover
+                        # alone as a static 2021 land-cover map. No temporal "change"
+                        # can be detected, but we can still report the land-cover
+                        # composition and Hansen GFW deforestation. The confidence
+                        # penalty reflects absence of a dynamic current layer.
+                        log.warning(
+                            "landuse.fallback_worldcover_only",
+                            reason="No Dynamic World scenes across any fallback window (15/30/90d)",
+                        )
+                        # Use ESA WorldCover as both current and baseline (no-change proxy)
+                        esa_static = (
+                            ee.ImageCollection("ESA/WorldCover/v200")
+                            .first()
+                            .select("Map")
+                            .rename("label")
+                        )
+                        # Re-map ESA to DW-compatible classes for change matrix below
+                        esa_as_dw = esa_static.remap(
+                            [10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 100],
+                            [1,  5,  2,  4,  6,  7,  8,  0,  3,  3,  2],
+                        ).rename("label")
+                        dw_current = ee.ImageCollection([esa_as_dw])
+                        dw_count = 0  # signal: static fallback, no dynamic scenes
+                        dw_source = "ESA WorldCover v200 (static — no Dynamic World coverage)"
+                    else:
+                        dw_source = f"Dynamic World (widened 90d: {w90_start}→{end_date})"
+                else:
+                    dw_source = f"Dynamic World (widened 30d: {w30_start}→{end_date})"
+            else:
+                dw_source = f"Dynamic World (widened 15d: {w15_start}→{end_date})"
+        else:
+            dw_source = f"Dynamic World ({start_date}→{end_date})"
 
         # Majority class composite
         current_label = dw_current.mode().rename("current_class")
-        confidence = min(1.0, 0.6 + dw_count * 0.05)
+        # Confidence: static WorldCover fallback = 0.30 (no temporal comparison),
+        # otherwise scale with number of DW scenes available.
+        if dw_count == 0:
+            confidence = 0.30  # static ESA WorldCover — no change detection possible
+        else:
+            confidence = min(1.0, 0.6 + dw_count * 0.05)
 
         # ── Baseline: ESA WorldCover v200 (2021) ─────────────────────────────
         esa_baseline = (
@@ -150,7 +213,7 @@ class LandUseProcessor(BaseThemeProcessor):
         )
 
         # ── Tile URL: current Dynamic World label ─────────────────────────────
-        tile_url, expires_at = gee_client.get_tile_url(current_label, VIS_LANDUSE)
+        tile_url, expires_at = gee_client.get_tile_url(current_label.clip(aoi), VIS_LANDUSE)
 
         anomaly_score = min(100.0, changed_area_ha / max(aoi_area_ha, 1) * 1000)
 
@@ -182,6 +245,6 @@ class LandUseProcessor(BaseThemeProcessor):
             anomaly_score=round(anomaly_score, 1),
             confidence=round(confidence, 2),
             data_age_hours=24.0,  # Dynamic World near-daily
-            data_source=f"Dynamic World V1 + ESA WorldCover v200 (2021 baseline) + Hansen GFW v1.11 (loss through 2023), {end_date}",
+            data_source=f"{dw_source} + ESA WorldCover v200 (2021 baseline) + Hansen GFW v1.11 (loss through 2023), {end_date}",
             error=None,
         )

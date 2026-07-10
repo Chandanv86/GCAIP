@@ -50,6 +50,7 @@ class ThemeResult(Base):
 
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     error_message: Mapped[str | None] = mapped_column(Text)
+    error_class: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     # Relationship
     run: Mapped["AnalysisRun"] = relationship("AnalysisRun", back_populates="theme_results")

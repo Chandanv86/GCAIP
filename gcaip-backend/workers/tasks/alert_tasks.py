@@ -8,20 +8,10 @@ import logging
 from datetime import datetime, timezone, timedelta
 
 from workers.celery_app import celery_app
+from db.utils import get_sync_session as _get_sync_session
 
 import structlog
 log = structlog.get_logger(__name__)
-
-
-def _get_sync_session():
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
-    from config import settings
-    sync_url = settings.DATABASE_URL.replace(
-        "postgresql+asyncpg://", "postgresql+psycopg2://"
-    )
-    engine = create_engine(sync_url, pool_pre_ping=True)
-    return sessionmaker(bind=engine)()
 
 
 @celery_app.task(name="workers.tasks.alert_tasks.evaluate_alerts_task",

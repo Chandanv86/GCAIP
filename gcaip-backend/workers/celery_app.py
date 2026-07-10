@@ -37,6 +37,11 @@ celery_app.conf.update(
     task_soft_time_limit=settings.CELERY_TASK_SOFT_TIME_LIMIT,
     task_time_limit=settings.CELERY_TASK_TIME_LIMIT,
 
+    # Dev mode: execute tasks inline in the FastAPI process (no separate worker needed).
+    # In production, set ENVIRONMENT=production and run real Celery workers.
+    task_always_eager=settings.ENVIRONMENT == "development",
+    task_eager_propagates=True,  # Re-raise task exceptions in eager mode for easier debugging
+
     # Routing — separate queues for GEE vs enrichment vs alerts
     task_routes={
         "workers.tasks.theme_tasks.*": {"queue": "gee_tasks"},
@@ -78,4 +83,31 @@ def setup_gee(sender, **kwargs):
         log = structlog.get_logger(__name__)
         log.error(
             "celery.gee_init_failed", error=str(exc)
+        )
+
+
+@celery_app.on_after_finalize.connect
+def check_redis_broker(sender, **kwargs):
+    """Verify Redis broker is reachable at worker startup.
+
+    This surfaces misconfigured CELERY_BROKER_URL/REDIS_URL immediately in the
+    worker logs instead of as a confusing 'Error 111 connection refused' on the
+    first task dispatch.
+    """
+    import redis as redis_lib
+    log = structlog.get_logger(__name__)
+    try:
+        r = redis_lib.from_url(settings.CELERY_BROKER_URL, socket_connect_timeout=3)
+        r.ping()
+        log.info("celery.broker_ok", url=settings.CELERY_BROKER_URL)
+    except Exception as exc:
+        log.error(
+            "celery.broker_unavailable",
+            url=settings.CELERY_BROKER_URL,
+            error=str(exc),
+            hint=(
+                "CELERY_BROKER_URL is set to '" + str(settings.CELERY_BROKER_URL) + "'. "
+                "Inside Docker Compose containers, use service name 'redis' not 'localhost'. "
+                "For bare-metal dev, ensure Redis is running: docker compose up -d redis"
+            ),
         )

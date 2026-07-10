@@ -194,9 +194,52 @@ out geom;
         a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlam / 2) ** 2
         return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
-    @staticmethod
-    def _bbox_hash(bbox: list[float]) -> str:
-        return hashlib.md5(json.dumps(bbox).encode()).hexdigest()[:12]
+    def get_pipelines(self, bbox: list[float]) -> dict:
+        """
+        Get pipeline centerline geometries (LineString/MultiLineString) from OSM.
+        
+        Args:
+            bbox: [min_lon, min_lat, max_lon, max_lat]
+            
+        Returns:
+            GeoJSON FeatureCollection representing the pipeline centerlines.
+        """
+        cache_key = f"gcaip:osm:pipelines:{self._bbox_hash(bbox)}"
+        cached = self._redis_get(cache_key)
+        if cached:
+            return json.loads(cached)
+
+        geojson = {"type": "FeatureCollection", "features": []}
+        try:
+            south, west, north, east = bbox[1], bbox[0], bbox[3], bbox[2]
+            bbox_str = f"{south},{west},{north},{east}"
+
+            query = f"""
+[out:json][timeout:25];
+(
+  way["man_made"="pipeline"]({bbox_str});
+);
+out geom;
+"""
+            data = self._query(query)
+            elements = data.get("elements", [])
+            for e in elements:
+                if e.get("type") == "way" and "geometry" in e:
+                    coords = [[pt["lon"], pt["lat"]] for pt in e["geometry"]]
+                    geojson["features"].append({
+                        "type": "Feature",
+                        "geometry": {
+                            "type": "LineString",
+                            "coordinates": coords
+                        },
+                        "properties": e.get("tags", {})
+                    })
+
+            self._redis_set(cache_key, json.dumps(geojson))
+        except Exception as exc:
+            log.warning("overpass.pipelines_error", error=str(exc))
+
+        return geojson
 
     @staticmethod
     def _redis_get(key: str) -> str | None:
@@ -216,3 +259,7 @@ out geom;
             r.setex(key, settings.REDIS_TTL_OSM, value)
         except Exception:
             pass
+
+    @staticmethod
+    def _bbox_hash(bbox: list[float]) -> str:
+        return hashlib.md5(json.dumps(bbox).encode()).hexdigest()[:12]

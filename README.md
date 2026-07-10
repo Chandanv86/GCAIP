@@ -72,6 +72,21 @@ Ensure you have the following installed on your system:
 - **Python 3.11+** (if running locally)
 - **Node.js 18+ & npm** (if running frontend locally)
 
+> [!IMPORTANT]
+> **Docker networking: `localhost` ≠ `redis` inside containers.**
+> When the API, worker, and beat containers run inside Docker Compose, they cannot reach
+> Redis via `localhost` — they must use the Docker service name `redis`.
+> The `docker-compose.yml` already sets `REDIS_URL`, `CELERY_BROKER_URL`, and
+> `CELERY_RESULT_BACKEND` to `redis://redis:6379/...` for all services.
+> **Never override these with `localhost` values inside containers.**
+> For **bare-metal development** (Option B), `localhost:6379` is correct because the app
+> runs directly on the host and connects to the Docker-exposed port.
+>
+> **Startup health checks:** Both the FastAPI process and the Celery worker ping Redis
+> at startup. If Redis is unreachable, you will see a clear log line:
+> `gcaip.startup.redis_unavailable` with actionable hints — not a raw connection error.
+> A successful connection logs: `gcaip.startup.redis_ok url=redis://...`
+
 ---
 
 ### 2. Google Earth Engine (GEE) Credentials
@@ -95,13 +110,16 @@ To enable satellite processing, you must configure a GEE service account:
 
 This runs the entire backend suite (PostgreSQL/TimescaleDB, Redis, FastAPI, Celery Worker, and Celery Beat) in Docker.
 
-1. Navigate to the backend directory and run:
+1. Navigate to the backend directory and spin up all containers:
    ```bash
    cd gcaip-backend
-   $env:PYTHONDONTWRITEBYTECODE=1
-   uvicorn main:app --reload --port 8000
+   docker compose up --build -d
    ```
-2. Check logs to verify service initialization:
+2. Run database migrations inside the active API container (using the name shadowing helper script):
+   ```bash
+   docker compose exec api python run_migrations.py
+   ```
+3. Check logs to verify service initialization:
    ```bash
    docker compose logs -f api worker
    ```
@@ -110,44 +128,75 @@ This runs the entire backend suite (PostgreSQL/TimescaleDB, Redis, FastAPI, Cele
 
 #### Option B: Hybrid Mode (Fast local python execution + DB/Redis in Docker)
 
-Best for active backend code changes and debugging.
+Best for active backend code changes, debugging, and live reloading.
 
 1. **Start Database and Redis containers**:
-
    ```bash
    cd gcaip-backend
    docker compose up -d db redis
    ```
-2. **Run database migrations**:
 
+2. **Set up Python Virtual Environment & Install Dependencies**:
+   - **On Windows**:
+     ```powershell
+     python -m venv venv
+     .\venv\Scripts\activate
+     pip install -r requirements.txt
+     ```
+   - **On macOS/Linux**:
+     ```bash
+     python3 -m venv venv
+     source venv/bin/activate
+     pip install -r requirements.txt
+     ```
+
+3. **Run database migrations**:
    ```bash
    # Ensure your virtual environment is active in your terminal
-   # On Windows: venv\Scripts\activate
-   # On Unix/macOS: source venv/bin/activate
    alembic upgrade head
    ```
-3. **Start the FastAPI server**:
 
-   ```bash
-   uvicorn main:app --reload --port 8000
-   ```
-4. **Start the Celery worker** (in a separate terminal with venv active):
-
-   - **On Windows** (requires `-P solo` to prevent `WinError 5` permission errors):
+4. **Start the FastAPI server**:
+   - **On Windows (PowerShell)**:
+     ```powershell
+     $env:PYTHONDONTWRITEBYTECODE=1
+     uvicorn main:app --reload --port 8000
+     ```
+   - **On macOS/Linux**:
      ```bash
+     export PYTHONDONTWRITEBYTECODE=1
+     uvicorn main:app --reload --port 8000
+     ```
+
+5. **Start the Celery worker** (in a separate terminal with venv active):
+   - **On Windows (PowerShell)** (requires `-P solo` to prevent `WinError 5` permission errors):
+     ```powershell
      cd gcaip-backend
+     .\venv\Scripts\activate
      $env:PYTHONDONTWRITEBYTECODE=1
      celery -A workers.celery_app worker --loglevel=info -P solo -Q default,gee_tasks,enrichment_tasks,alert_tasks
      ```
    - **On macOS/Linux**:
      ```bash
+     cd gcaip-backend
+     source venv/bin/activate
+     export PYTHONDONTWRITEBYTECODE=1
      celery -A workers.celery_app worker --loglevel=info --concurrency=2 -Q default,gee_tasks,enrichment_tasks,alert_tasks
      ```
-5. **Start Celery Beat** (only needed for scheduled alerts, in a separate terminal with venv active):
 
-   ```bash
-   celery -A workers.celery_app beat --loglevel=info
-   ```
+6. **Start Celery Beat** (only needed for scheduled alerts, in a separate terminal with venv active):
+   - **On Windows**:
+     ```powershell
+     cd gcaip-backend
+     .\venv\Scripts\activate
+     celery -A workers.celery_app beat --loglevel=info
+     ```
+   - **On macOS/Linux**:
+     ```bash
+     cd gcaip-backend
+     source venv/bin/activate
+     celery -A workers.celery_app beat --loglevel=info
+     ```
 
 ---
 
@@ -209,4 +258,3 @@ Your frontend is served by Vite on port `5173`.
   flood-risk signal alongside SAR.
 - User authentication is stubbed (`models/user.py` exists, no auth routes
   yet) — AOIs are currently anonymous/public.
-

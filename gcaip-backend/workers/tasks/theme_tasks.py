@@ -14,28 +14,19 @@ import uuid
 from datetime import datetime, timezone
 
 from celery import Task, chord, group
+from celery.exceptions import SoftTimeLimitExceeded
 from sqlalchemy import select, update
 
 from workers.celery_app import celery_app
+from db.utils import get_sync_session
 
 import structlog
 log = structlog.get_logger(__name__)
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
-def _get_sync_session():
-    """Synchronous SQLAlchemy session for Celery tasks (not async)."""
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
-    from config import settings
-
-    # Convert asyncpg URL to psycopg2 for sync Celery workers
-    sync_url = settings.DATABASE_URL.replace(
-        "postgresql+asyncpg://", "postgresql+psycopg2://"
-    )
-    engine = create_engine(sync_url, pool_pre_ping=True)
-    Session = sessionmaker(bind=engine)
-    return Session()
+# Use shared helper — see db/utils.py for the asyncpg→psycopg2 substitution logic.
+_get_sync_session = get_sync_session
 
 
 def _get_redis():
@@ -46,16 +37,28 @@ def _get_redis():
 
 
 def _publish_theme_event(run_id: str, theme: str, result_dict: dict) -> None:
-    """Publish theme result to Redis channel so SSE endpoint can stream it."""
-    r = _get_redis()
-    channel = f"gcaip:sse:{run_id}"
-    payload = json.dumps({
-        "event": "theme_complete" if not result_dict.get("error") else "theme_error",
-        "theme": theme,
-        "result": result_dict,
-    }, default=str)
-    r.publish(channel, payload)
-    r.expire(channel, 3600)  # Channel auto-expires after 1h
+    """Publish theme result to Redis channel so SSE endpoint can stream it.
+
+    Redis pub/sub is a soft dependency for SSE streaming — if Redis is
+    unavailable the task still completes and the result is persisted to DB.
+    The SSE endpoint's 15s polling safety-net will eventually pick it up.
+    """
+    try:
+        r = _get_redis()
+        channel = f"gcaip:sse:{run_id}"
+        payload = json.dumps({
+            "event": "theme_complete" if not result_dict.get("error") else "theme_error",
+            "theme": theme,
+            "result": result_dict,
+        }, default=str)
+        r.publish(channel, payload)
+        r.expire(channel, 3600)  # Channel auto-expires after 1h
+    except Exception as exc:
+        log.warning(
+            "theme_task.redis_publish_failed",
+            run_id=run_id, theme=theme, error=str(exc),
+            note="SSE stream will fall back to DB polling",
+        )
 
 
 def _store_theme_result(run_id: str, theme: str, result) -> None:
@@ -90,6 +93,7 @@ def _store_theme_result(run_id: str, theme: str, result) -> None:
         obj.data_age_hours = result.data_age_hours
         obj.data_source = result.data_source
         obj.error_message = result.error
+        obj.error_class = getattr(result, "error_class", None)
         obj.completed_at = now
 
         session.commit()
@@ -102,7 +106,7 @@ def _store_theme_result(run_id: str, theme: str, result) -> None:
 
 
 def _check_run_complete(run_id: str) -> bool:
-    """Check if all 7 theme tasks are done; if so, trigger risk scoring."""
+    """Check if all theme tasks for this run are done; if so, trigger risk scoring."""
     from models.theme_result import ThemeResult as ThemeResultModel
 
     session = _get_sync_session()
@@ -113,7 +117,7 @@ def _check_run_complete(run_id: str) -> bool:
             .all()
         )
         done_statuses = {"complete", "failed", "skipped"}
-        if all(r.status in done_statuses for r in results) and len(results) >= len(ACTIVE_THEMES):
+        if results and all(r.status in done_statuses for r in results):
             # All themes done — trigger risk score computation
             from workers.tasks.enrichment_tasks import compute_risk_score_task
             compute_risk_score_task.delay(run_id)
@@ -126,22 +130,57 @@ def _check_run_complete(run_id: str) -> bool:
 # ── Base task class ────────────────────────────────────────────────────────────
 
 class GEETask(Task):
-    """Base class: sets status=running on start, status=failed on crash."""
+    """Base class: sets status=running on start, status=failed on crash.
+
+    Handles SoftTimeLimitExceeded (Celery sends SIGUSR1 at soft limit) so the
+    ThemeResult row is always written as 'failed' rather than left at 'running'
+    when a task is killed. Without this handler, rows stuck at 'running' prevent
+    _check_run_complete from ever triggering risk scoring for that run.
+    """
 
     def on_failure(self, exc, task_id, args, kwargs, einfo):
         run_id = kwargs.get("run_id") or (args[0] if args else None)
         theme = kwargs.get("theme") or self.name.split(".")[-1].replace("_task", "")
         if run_id:
+            is_timeout = isinstance(exc, SoftTimeLimitExceeded)
+            error_msg = (
+                f"Task timed out (Celery soft limit {self.soft_time_limit}s exceeded — "
+                f"GEE call budget exceeded. Increase CELERY_TASK_SOFT_TIME_LIMIT or "
+                f"reduce GEE_TIMEOUT_SECONDS/GEE_MAX_RETRIES in config.)"
+                if is_timeout else str(exc)
+            )
             log.error(
                 "gee_task.failed",
                 task=self.name,
                 run_id=str(run_id),
-                error=str(exc),
+                error=error_msg,
+                is_timeout=is_timeout,
             )
+            # Write the failure to DB so the row is never left at 'running'
+            try:
+                from models.theme_result import ThemeResult as ThemeResultModel
+                session = _get_sync_session()
+                try:
+                    obj = session.query(ThemeResultModel).filter_by(
+                        run_id=run_id, theme=theme
+                    ).first()
+                    if obj:
+                        obj.status = "failed"
+                        obj.error_message = error_msg
+                        obj.error_class = "timeout" if is_timeout else "task_error"
+                        obj.completed_at = datetime.now(timezone.utc)
+                        session.commit()
+                finally:
+                    session.close()
+            except Exception as db_exc:
+                log.error("gee_task.on_failure_db_error", error=str(db_exc))
+
             _publish_theme_event(
                 str(run_id), theme,
-                {"theme": theme, "error": str(exc), "status": "failed"},
+                {"theme": theme, "error": error_msg, "status": "failed"},
             )
+            # Still check run completion so enrichment/risk scoring fires
+            _check_run_complete(str(run_id))
 
 
 # ── Theme tasks ────────────────────────────────────────────────────────────────
@@ -150,61 +189,77 @@ def _run_theme(processor_cls, theme: str, run_id: str, aoi_geojson: dict,
                date_range: tuple, cache_key: str | None = None) -> dict:
     """
     Generic theme runner — processor → store → publish → check completion.
-    Used by all 7 theme tasks.
+    Used by all 10 theme tasks.
     """
     import redis as redis_lib
     from config import settings
 
-    # Cache check — same AOI within 6h skips GEE
+    # Cache check — same AOI within 6h skips GEE.
+    # Redis cache is a SOFT dependency: on connection failure, log and continue.
     if cache_key:
-        r = redis_lib.from_url(settings.REDIS_URL)
-        cached = r.get(f"gcaip:cache:{cache_key}:{theme}")
-        if cached:
-            log.info("theme_task.cache_hit", theme=theme, key=cache_key)
-            result_dict = json.loads(cached)
-            
-            # Reconstruct ThemeResult for DB storage
-            from gee.processors.base import ThemeResult
-            expires_str = result_dict.get("tile_url_expires_at")
-            expires_dt = datetime.fromisoformat(expires_str) if expires_str else None
-            
-            result = ThemeResult(
-                theme=result_dict.get("theme", theme),
-                tile_url=result_dict.get("tile_url"),
-                tile_url_expires_at=expires_dt,
-                vis_params=result_dict.get("vis_params"),
-                metric_value=result_dict.get("metric_value"),
-                metric_unit=result_dict.get("metric_unit"),
-                metric_label=result_dict.get("metric_label"),
-                stats=result_dict.get("stats"),
-                anomaly_score=result_dict.get("anomaly_score"),
-                confidence=result_dict.get("confidence"),
-                data_age_hours=result_dict.get("data_age_hours"),
-                data_source=result_dict.get("data_source"),
-                error=result_dict.get("error"),
+        try:
+            r = redis_lib.from_url(settings.REDIS_URL)
+            cached = r.get(f"gcaip:cache:{cache_key}:{theme}")
+            if cached:
+                log.info("theme_task.cache_hit", theme=theme, key=cache_key)
+                result_dict = json.loads(cached)
+
+                # Reconstruct ThemeResult for DB storage
+                from gee.processors.base import ThemeResult
+                expires_str = result_dict.get("tile_url_expires_at")
+                expires_dt = datetime.fromisoformat(expires_str) if expires_str else None
+
+                result = ThemeResult(
+                    theme=result_dict.get("theme", theme),
+                    tile_url=result_dict.get("tile_url"),
+                    tile_url_expires_at=expires_dt,
+                    vis_params=result_dict.get("vis_params"),
+                    metric_value=result_dict.get("metric_value"),
+                    metric_unit=result_dict.get("metric_unit"),
+                    metric_label=result_dict.get("metric_label"),
+                    stats=result_dict.get("stats"),
+                    anomaly_score=result_dict.get("anomaly_score"),
+                    confidence=result_dict.get("confidence"),
+                    data_age_hours=result_dict.get("data_age_hours"),
+                    data_source=result_dict.get("data_source"),
+                    error=result_dict.get("error"),
+                )
+
+                _store_theme_result(run_id, theme, result)
+                _publish_theme_event(run_id, theme, result_dict)
+                _check_run_complete(run_id)
+                return result_dict
+        except Exception as cache_exc:
+            log.warning(
+                "theme_task.cache_unavailable",
+                theme=theme, error=str(cache_exc),
+                note="Redis cache miss — running GEE processor",
             )
-            
-            _store_theme_result(run_id, theme, result)
-            _publish_theme_event(run_id, theme, result_dict)
-            _check_run_complete(run_id)
-            return result_dict
+            # Fall through to the real GEE computation
 
     processor = processor_cls()
     result = processor.compute(aoi_geojson, date_range)
     result_dict = result.to_dict()
 
-    # Cache the result
-    if (cache_key 
-        and not result.error 
-        and result.confidence is not None 
+    # Write to cache — soft dependency, skip on Redis failure
+    if (cache_key
+        and not result.error
+        and result.confidence is not None
         and result.confidence >= 0.4  # minimum confidence to cache
         and result.metric_value is not None):
-        r = redis_lib.from_url(settings.REDIS_URL)
-        r.setex(
-            f"gcaip:cache:{cache_key}:{theme}",
-            settings.REDIS_TTL_TILE_URL,
-            json.dumps(result_dict, default=str),
-        )
+        try:
+            r = redis_lib.from_url(settings.REDIS_URL)
+            r.setex(
+                f"gcaip:cache:{cache_key}:{theme}",
+                settings.REDIS_TTL_TILE_URL,
+                json.dumps(result_dict, default=str),
+            )
+        except Exception as cache_write_exc:
+            log.warning(
+                "theme_task.cache_write_failed",
+                theme=theme, error=str(cache_write_exc),
+                note="Result not cached; will recompute on next identical request",
+            )
 
     _store_theme_result(run_id, theme, result)
     _publish_theme_event(run_id, theme, result_dict)
@@ -282,6 +337,36 @@ def landuse_task(self, run_id: str, aoi_geojson: dict,
                       tuple(date_range), cache_key)
 
 
+@celery_app.task(base=GEETask, name="workers.tasks.theme_tasks.effluent_plume_task",
+                  bind=True, max_retries=2)
+def effluent_plume_task(self, run_id: str, aoi_geojson: dict,
+                        date_range: list, cache_key: str | None = None) -> dict:
+    """Theme 8: Effluent Plume Detection (Sentinel-2/Landsat/Sentinel-3)."""
+    from gee.processors.effluent_plume import EffluentPlumeProcessor
+    return _run_theme(EffluentPlumeProcessor, "effluent_plume", run_id, aoi_geojson,
+                      tuple(date_range), cache_key)
+
+
+@celery_app.task(base=GEETask, name="workers.tasks.theme_tasks.coastal_outfall_task",
+                  bind=True, max_retries=2)
+def coastal_outfall_task(self, run_id: str, aoi_geojson: dict,
+                         date_range: list, cache_key: str | None = None) -> dict:
+    """Theme 9: Coastal Outfall Marine Plume Detection (Sentinel-2/Landsat)."""
+    from gee.processors.coastal_outfall import CoastalOutfallProcessor
+    return _run_theme(CoastalOutfallProcessor, "coastal_outfall", run_id, aoi_geojson,
+                      tuple(date_range), cache_key)
+
+
+@celery_app.task(base=GEETask, name="workers.tasks.theme_tasks.pipeline_corridor_task",
+                  bind=True, max_retries=2)
+def pipeline_corridor_task(self, run_id: str, aoi_geojson: dict,
+                           date_range: list, cache_key: str | None = None) -> dict:
+    """Theme 10: Pipeline Corridor Disturbance (Sentinel-1/Sentinel-2/DynamicWorld)."""
+    from gee.processors.pipeline_corridor import PipelineCorridorProcessor
+    return _run_theme(PipelineCorridorProcessor, "pipeline_corridor", run_id, aoi_geojson,
+                      tuple(date_range), cache_key)
+
+
 # ── Orchestration ──────────────────────────────────────────────────────────────
 
 THEME_TASKS = {
@@ -292,10 +377,13 @@ THEME_TASKS = {
     "erosion": erosion_task,
     "vegetation": vegetation_task,
     "landuse": landuse_task,
+    "effluent_plume": effluent_plume_task,
+    "coastal_outfall": coastal_outfall_task,
+    "pipeline_corridor": pipeline_corridor_task,
 }
 
 # Active themes — only these are dispatched by default
-ACTIVE_THEMES = {"rainfall", "landuse"}
+ACTIVE_THEMES = {"rainfall", "landuse", "effluent_plume", "coastal_outfall", "pipeline_corridor"}
 
 
 def dispatch_all_themes(

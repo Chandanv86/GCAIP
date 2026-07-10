@@ -12,6 +12,7 @@ import maplibregl, { Map as MapLibreMap, LngLatBoundsLike } from 'maplibre-gl'
 import { useAnalysisStore } from '@/store/analysisStore'
 import { createAOI } from '@/api/aoi'
 import { triggerAnalysis } from '@/api/analysis'
+import { searchPipelines } from '@/api/pipelines'
 import type { AOI } from '@/types/theme'
 import ThemeLayerManager from './ThemeLayerManager'
 import DrawControl from './DrawControl'
@@ -63,6 +64,44 @@ const AOI_SOURCE = 'aoi-source'
 const AOI_FILL = 'aoi-fill'
 const AOI_OUTLINE = 'aoi-outline'
 const AOI_LABEL = 'aoi-label'
+
+// P3a: Pipeline vector layer constants
+const PIPELINE_SOURCE = 'pipeline-source'
+const PIPELINE_LINE = 'pipeline-line'
+
+/** Remove pipeline vector layers from map */
+function clearPipelinesFromMap(map: MapLibreMap) {
+  if (map.getLayer(PIPELINE_LINE)) map.removeLayer(PIPELINE_LINE)
+  if (map.getSource(PIPELINE_SOURCE)) map.removeSource(PIPELINE_SOURCE)
+}
+
+/** Render pipeline GeoJSON as a distinct dashed black line layer */
+function renderPipelinesOnMap(map: MapLibreMap, vectors: GeoJSON.FeatureCollection) {
+  clearPipelinesFromMap(map)
+  if (!vectors.features || vectors.features.length === 0) return
+
+  map.addSource(PIPELINE_SOURCE, {
+    type: 'geojson',
+    data: vectors,
+  })
+
+  map.addLayer({
+    id: PIPELINE_LINE,
+    type: 'line',
+    source: PIPELINE_SOURCE,
+    layout: {
+      'line-join': 'round',
+      'line-cap': 'round',
+    },
+    paint: {
+      // Visually distinct from AOI outline (blue dashed) and theme tile overlays
+      'line-color': '#222222',
+      'line-width': 2.5,
+      'line-dasharray': [4, 2],
+      'line-opacity': 0.85,
+    },
+  })
+}
 
 /** Remove any existing AOI layers + source from the map */
 function clearAOIFromMap(map: MapLibreMap) {
@@ -238,6 +277,8 @@ export default function GlobeView() {
   const setError = useAnalysisStore((s) => s.setError)
   const reset = useAnalysisStore((s) => s.reset)
   const setSelectedPreset = useAnalysisStore((s) => s.setSelectedPreset)
+  const setPipelineVectors = useAnalysisStore((s) => s.setPipelineVectors)
+  const pipelineVectors = useAnalysisStore((s) => s.pipelineVectors)
 
   const handleAOISubmit = useCallback(
     async (geojson: GeoJSON.Feature, presetZone?: import('@/data/presetZones').PresetZone) => {
@@ -261,6 +302,30 @@ export default function GlobeView() {
           renderAOIOnMap(mapRef.current, aoi)
         }
 
+        // P3a: Fetch pipeline vectors for this AOI's bounding box (reference data,
+        // independent of the analysis run — shown immediately, not gated on theme results).
+        // Fire-and-forget with graceful failure; pipelines are reference data, not critical.
+        const geom = geojson.geometry as GeoJSON.Polygon | undefined
+        if (geom && geom.type === 'Polygon' && geom.coordinates?.[0]) {
+          const coords = geom.coordinates[0] as [number, number][]
+          const lngs = coords.map((c) => c[0])
+          const lats = coords.map((c) => c[1])
+          const bbox = {
+            min_lon: Math.min(...lngs),
+            min_lat: Math.min(...lats),
+            max_lon: Math.max(...lngs),
+            max_lat: Math.max(...lats),
+          }
+          searchPipelines(bbox)
+            .then((vectors) => {
+              setPipelineVectors(vectors)
+              console.log('[GCAIP] pipeline search:', vectors.features?.length ?? 0, 'features')
+            })
+            .catch((err) => {
+              console.warn('[GCAIP] pipeline search failed (non-critical):', err)
+            })
+        }
+
         console.log('[GCAIP] triggerAnalysis request:', { aoi_id: aoi.aoi_id })
         const { job_id } = await triggerAnalysis({ aoi_id: aoi.aoi_id })
         console.log('[GCAIP] triggerAnalysis response:', { job_id })
@@ -271,7 +336,7 @@ export default function GlobeView() {
         setError(message)
       }
     },
-    [reset, setSelectedAOI, startAnalysis, setError, setSelectedPreset],
+    [reset, setSelectedAOI, startAnalysis, setError, setSelectedPreset, setPipelineVectors],
   )
 
   // Clean up AOI layers when the analysis panel is closed (reset)
@@ -280,10 +345,21 @@ export default function GlobeView() {
       // Detect reset: selectedAOI went from non-null to null
       if (prevState.selectedAOI && !state.selectedAOI && mapRef.current) {
         clearAOIFromMap(mapRef.current)
+        clearPipelinesFromMap(mapRef.current)
       }
     })
     return unsub
   }, [])
+
+  // P3a: Render pipeline vectors whenever they change in store
+  useEffect(() => {
+    if (!mapRef.current) return
+    if (pipelineVectors) {
+      renderPipelinesOnMap(mapRef.current, pipelineVectors)
+    } else {
+      clearPipelinesFromMap(mapRef.current)
+    }
+  }, [pipelineVectors])
 
   useEffect(() => {
     if (!mapContainerRef.current || mapRef.current) return

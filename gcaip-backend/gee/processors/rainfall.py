@@ -218,7 +218,7 @@ class RainfallProcessor(BaseThemeProcessor):
         if col_30d.size().getInfo() > 0:
             multiplier = 0.5 if "IMERG" in precip_source else 1.0
             accum_30d_img = col_30d.select("precipitation").map(lambda img: img.multiply(multiplier)).sum()
-            tile_url, expires_at = gee_client.get_tile_url(accum_30d_img, VIS_RAINFALL)
+            tile_url, expires_at = gee_client.get_tile_url(accum_30d_img.clip(aoi), VIS_RAINFALL)
         else:
             tile_url, expires_at = None, None
 
@@ -235,6 +235,33 @@ class RainfallProcessor(BaseThemeProcessor):
             confidence = 0.35              # No satellite observations at all
         if date_shifted:
             confidence = max(0.35, confidence - 0.10)  # Penalize for stale data
+
+        # Plausibility check: flag results where high-confidence extreme dryness
+        # is contradicted by the raw accumulation relative to baseline.
+        # If accum_7d is within 70% of the climatological mean yet SPI < -1.5,
+        # the SPI is likely driven by a miscalibrated/sparse CHIRPS baseline
+        # rather than a genuine drought signal — flag for review.
+        plausibility_flag = None
+        if (spi_7 < -1.5
+                and confidence >= 0.75
+                and clim_7d["mean"] > 0
+                and accum_7d >= clim_7d["mean"] * 0.7):
+            plausibility_flag = (
+                f"SPI={spi_7:.2f} (Extremely/Very Dry) but raw 7-day accumulation "
+                f"({accum_7d:.1f}mm) is \u226570% of climatological mean "
+                f"({clim_7d['mean']:.1f}mm). SPI may be skewed by sparse CHIRPS "
+                f"pixels at scale=5500m for this AOI size. Treat with caution."
+            )
+            # Reduce confidence to reflect correctness risk
+            confidence = max(0.35, confidence - 0.20)
+            log.warning(
+                "rainfall.plausibility_mismatch",
+                spi_7=spi_7,
+                accum_7d=accum_7d,
+                chirps_mean=clim_7d["mean"],
+                original_confidence=round(confidence + 0.20, 2),
+                adjusted_confidence=round(confidence, 2),
+            )
 
         # Anomaly score: |SPI| normalized to 0-100
         anomaly_score = min(100.0, abs(spi_7) / 3.0 * 100.0)
@@ -273,11 +300,16 @@ class RainfallProcessor(BaseThemeProcessor):
                 "spi_label": spi_label,
                 "flash_flood_risk": flash_flood_risk,
                 "max_30min_rate_mm_hr": round(max_rate_mm_hr, 1),
+                "date_shifted": date_shifted,           # flag for UI transparency
+                "analysis_end_date": end_date,          # actual date used (may differ from request)
+                "plausibility_flag": plausibility_flag,  # None or warning string
             },
             anomaly_score=round(anomaly_score, 1),
             confidence=round(confidence, 2),
             data_age_hours=actual_data_age_hours,
-            data_source=f"{precip_source} (NRT) + CHIRPS 1981-2020 baseline, {end_date}",
+            # Include the ACTUAL end_date used in data_source string, not the
+            # originally requested date. date_shifted=True means these differ.
+            data_source=f"{precip_source} (NRT) + CHIRPS 1981-2020 baseline, analysis_end={end_date}{' [date-shifted from requested]' if date_shifted else ''}",
             error=None,
         )
 
@@ -289,35 +321,51 @@ class RainfallProcessor(BaseThemeProcessor):
         days: int,
     ) -> dict[str, float]:
         """
-        Compute historical mean and std using a SINGLE GEE reduceRegion call.
-        Filters CHIRPS by calendar day-of-year window across all baseline 
-        years — no Python loop, everything runs server-side in GEE.
-        """
-        # Get day-of-year window (±15 days around ref_date)
-        doy = ref_date.timetuple().tm_yday
-        doy_start = max(1, doy - 15)
-        doy_end = min(365, doy + 15)
+        Compute the N-day accumulated precipitation baseline from CHIRPS.
 
-        # Filter entire CHIRPS collection by DOY window, 1991-2020 baseline
-        baseline = (
-            chirps
-            .filter(ee.Filter.date("1991-01-01", "2021-01-01"))
-            .filter(ee.Filter.calendarRange(doy_start, doy_end, "day_of_year"))
-            .select("precipitation")
+        For each year in the 1991-2020 baseline, sums CHIRPS daily values over
+        the exact N-day window ending on the same calendar date as ref_date.
+        Then takes mean and std of those ~30 annual N-day totals.
+
+        This is the correct SPI approach: comparing an N-day accumulation
+        (from GPM) against an N-day accumulated climatology (from CHIRPS).
+        The previous implementation took a ±15-day DOY daily mean and scaled
+        by N, which overestimated the baseline (e.g. daily mean 12mm/day × 7
+        = 84mm baseline, vs actual 7-day total of ~40mm → wrong SPI sign).
+        """
+        from datetime import timedelta as _td
+
+        BASELINE_YEARS = list(range(1991, 2021))  # 30-year WMO standard period
+
+        # Window: [ref_date - N days, ref_date] for each baseline year
+        # Build a per-year summed image collection server-side via mapped filter+sum
+        def _year_sum(yr: int) -> "ee.Image":
+            yr_ref = ref_date.replace(year=yr)
+            yr_start = (yr_ref - _td(days=days)).isoformat()
+            yr_end = yr_ref.isoformat()
+            return (
+                chirps
+                .filterDate(yr_start, yr_end)
+                .select("precipitation")
+                .sum()
+                .set("year", yr)
+            )
+
+        year_sums = ee.ImageCollection(
+            [_year_sum(yr) for yr in BASELINE_YEARS]
         )
 
-        # Count available scenes — if too few, return safe defaults
-        scene_count = baseline.size().getInfo()  # 1 call only
+        # Count usable years (some early years may have sparse CHIRPS coverage)
+        scene_count = gee_client.safe_call(year_sums.size().getInfo)
         if scene_count < 5:
             return {"mean": 0.0, "std": 1.0, "scene_count": 0}
 
-        # Compute mean and variance composites server-side — single reduceRegion
-        mean_img = baseline.mean()
-        variance_img = baseline.map(
+        # Server-side mean and std of the per-year N-day totals
+        mean_img = year_sums.mean()
+        variance_img = year_sums.map(
             lambda img: img.subtract(mean_img).pow(2)
         ).mean()
 
-        # Single reduceRegion call for both mean and variance
         stats = gee_client.get_stats(
             image=mean_img.rename("mean").addBands(
                 variance_img.sqrt().rename("std")
@@ -327,17 +375,14 @@ class RainfallProcessor(BaseThemeProcessor):
             reducer=ee.Reducer.mean(),
         )
 
-        # Daily mean and standard deviation from GEE
-        mean_val_daily = float(stats.get("mean", 0) or 0)
-        std_val_daily = float(stats.get("std", 0.1) or 0.1)
-
-        # Scale from daily values to the N-day accumulation window
-        mean_val = mean_val_daily * days
-        std_val = std_val_daily * (days ** 0.5)
+        mean_val = float(stats.get("mean", 0) or 0)
+        std_val = float(stats.get("std", 0.1) or 0.1)
 
         return {
             "mean": mean_val,
-            "std": max(std_val, mean_val * 0.2, 1.0),  # minimum 20% of mean
+            # Floor: at least 20% of mean or 1mm — prevents SPI blowing up in
+            # near-zero-variance hyper-arid zones.
+            "std": max(std_val, mean_val * 0.20, 1.0),
             "scene_count": scene_count,
         }
 

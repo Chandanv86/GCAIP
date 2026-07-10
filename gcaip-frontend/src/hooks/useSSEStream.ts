@@ -15,6 +15,7 @@ export function useSSEStream(runId: string | null): void {
   const setRiskScore = useAnalysisStore((s) => s.setRiskScore)
   const completeAnalysis = useAnalysisStore((s) => s.completeAnalysis)
   const setError = useAnalysisStore((s) => s.setError)
+  const setPipelineVectors = useAnalysisStore((s) => s.setPipelineVectors)
 
   const eventSourceRef = useRef<EventSource | null>(null)
 
@@ -52,6 +53,19 @@ export function useSSEStream(runId: string | null): void {
           const theme = payload.theme as ThemeId
           const result = payload.result as ThemeResult
           setThemeResult(theme, result)
+          
+          if (theme === 'pipeline_corridor' && result.stats?.pipeline_corridor_geojson) {
+             const geojson = result.stats.pipeline_corridor_geojson as any;
+             let fc: GeoJSON.FeatureCollection;
+             if (geojson.type === 'FeatureCollection') {
+                 fc = geojson;
+             } else if (geojson.type === 'Feature') {
+                 fc = { type: 'FeatureCollection', features: [geojson] };
+             } else {
+                 fc = { type: 'FeatureCollection', features: [{ type: 'Feature', properties: {}, geometry: geojson }] };
+             }
+             setPipelineVectors(fc);
+          }
           break
         }
         case 'risk_score':

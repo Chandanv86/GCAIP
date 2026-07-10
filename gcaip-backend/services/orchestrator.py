@@ -16,7 +16,10 @@ from config import settings
 
 log = structlog.get_logger(__name__)
 
-ALL_THEMES = ["rainfall", "landuse"]
+ALL_THEMES = [
+    "rainfall", "landuse",
+    "effluent_plume", "coastal_outfall", "pipeline_corridor",
+]
 
 
 class AnalysisOrchestrator:
@@ -73,13 +76,39 @@ class AnalysisOrchestrator:
 
         # ── Dispatch GEE tasks in parallel ───────────────────────────────────
         from workers.tasks.theme_tasks import dispatch_all_themes
-        dispatch_all_themes(
-            run_id=run_id,
-            aoi_geojson=aoi_geojson,
-            date_range=(start_date, end_date),
-            themes=themes,
-            cache_key=cache_key,
-        )
+        try:
+            dispatch_all_themes(
+                run_id=run_id,
+                aoi_geojson=aoi_geojson,
+                date_range=(start_date, end_date),
+                themes=themes,
+                cache_key=cache_key,
+            )
+        except Exception as broker_exc:
+            err_str = str(broker_exc).lower()
+            if "connection refused" in err_str or "111" in err_str or "redis" in err_str:
+                # Mark the run as failed so it doesn't stay stuck at 'running'
+                from sqlalchemy import update
+                from models.analysis_run import AnalysisRun as _Run
+                await db.execute(
+                    update(_Run)
+                    .where(_Run.id == run.id)
+                    .values(status="failed")
+                )
+                await db.commit()
+                from fastapi import HTTPException
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "Redis task broker is unreachable. "
+                        "The analysis job queue cannot start. "
+                        f"Configured broker: {settings.CELERY_BROKER_URL}. "
+                        "For Docker Compose deployments: verify CELERY_BROKER_URL uses "
+                        "the service name 'redis' (not 'localhost'). "
+                        "For bare-metal dev: run 'docker compose up -d redis' in gcaip-backend/."
+                    ),
+                )
+            raise  # non-broker error — let the global handler deal with it
 
         log.info(
             "orchestrator.dispatched",

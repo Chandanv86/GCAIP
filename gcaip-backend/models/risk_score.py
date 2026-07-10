@@ -34,6 +34,8 @@ class RiskScore(Base):
     water_stress: Mapped[float | None] = mapped_column(Float)        # 15% weight
     vegetation_health: Mapped[float | None] = mapped_column(Float)   # 15% weight
     landuse_pressure: Mapped[float | None] = mapped_column(Float)    # 15% weight
+    water_sanitation_pressure: Mapped[float | None] = mapped_column(Float)
+    infrastructure_integrity: Mapped[float | None] = mapped_column(Float)
 
     # Cross-theme compound insights
     cross_insights: Mapped[list] = mapped_column(JSONB, default=list)

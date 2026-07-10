@@ -17,7 +17,87 @@ router = APIRouter()
 VALID_THEMES = [
     "flood", "rainfall", "reservoir",
     "mangrove", "erosion", "vegetation", "landuse",
+    "effluent_plume", "coastal_outfall", "pipeline_corridor",
 ]
+
+
+@router.get("/pipelines/search")
+async def search_pipelines(
+    min_lon: float = Query(...),
+    min_lat: float = Query(...),
+    max_lon: float = Query(...),
+    max_lat: float = Query(...),
+) -> dict:
+    """
+    Query pipeline geometries for a bounding box.
+
+    Resolution order (matches pipeline_corridor.py processor):
+      1. OpenStreetMap via Overpass (man_made=pipeline) — cached 24h.
+      2. EDF/OGIM/current via GEE — used when OSM returns 0 features.
+         This ensures the frontend always renders the SAME geometry the backend analyzed.
+    """
+    import asyncio
+    from integrations.overpass import OverpassClient
+    client = OverpassClient()
+    bbox = [min_lon, min_lat, max_lon, max_lat]
+
+    try:
+        geojson = client.get_pipelines(bbox)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Overpass query failed: {exc}")
+
+    # If OSM returned no features, fall back to OGIM.
+    # GEE calls are blocking — run in thread pool to avoid stalling the event loop.
+    if not geojson.get("features"):
+        def _fetch_ogim() -> dict:
+            try:
+                import ee
+                from gee import client as gee_client
+                gee_client.initialize()
+
+                aoi = ee.Geometry.BBox(min_lon, min_lat, max_lon, max_lat)
+                ogim = (
+                    ee.FeatureCollection("EDF/OGIM/current")
+                    .filterBounds(aoi)
+                    .filter(ee.Filter.stringContains("CATEGORY", "PIPELINE"))
+                )
+                count = gee_client.safe_call(ogim.size().getInfo)
+                if not count:
+                    return {"type": "FeatureCollection", "features": []}
+
+                raw = gee_client.safe_call(
+                    ogim.limit(500).map(lambda f: f.simplify(maxError=50)).getInfo
+                )
+                features = []
+                for feat in (raw or {}).get("features", []):
+                    geom = feat.get("geometry")
+                    props = feat.get("properties", {})
+                    if geom:
+                        features.append({
+                            "type": "Feature",
+                            "geometry": geom,
+                            "properties": {
+                                "source": "EDF/OGIM/current",
+                                "category": props.get("CATEGORY", "PIPELINE"),
+                                "operator": props.get("OPERATOR", ""),
+                            },
+                        })
+                return {"type": "FeatureCollection", "features": features}
+            except Exception as ogim_exc:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "pipelines_search.ogim_fallback_failed: %s", str(ogim_exc)
+                )
+                return {"type": "FeatureCollection", "features": []}
+
+        loop = asyncio.get_event_loop()
+        geojson = await loop.run_in_executor(None, _fetch_ogim)
+
+    return geojson
+
+
+
+
 
 
 @router.get("/themes/{theme}/history/{aoi_id}")
@@ -129,4 +209,6 @@ def _theme_default_unit(theme: str) -> str:
         "flood": "km²", "rainfall": "mm", "reservoir": "%",
         "mangrove": "ha", "erosion": "m/yr",
         "vegetation": "NDVI", "landuse": "ha",
+        "effluent_plume": "km²", "coastal_outfall": "km²",
+        "pipeline_corridor": "m",
     }.get(theme, "")

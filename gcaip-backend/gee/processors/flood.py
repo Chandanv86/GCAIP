@@ -215,7 +215,7 @@ class FloodProcessor(BaseThemeProcessor):
 
         # ── 8. Get tile URL ──────────────────────────────────────────────────
         tile_url, expires_at = gee_client.get_tile_url(
-            flood_class.visualize(**VIS_FLOOD), {}
+            flood_class.clip(aoi).visualize(**VIS_FLOOD), {}
         )
 
         # ── 9. Anomaly score ─────────────────────────────────────────────────

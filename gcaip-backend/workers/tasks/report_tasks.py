@@ -1,28 +1,23 @@
 """
 PDF Report Generation — converts a completed analysis run into a
 client-ready PDF using WeasyPrint (HTML → PDF).
+
+P7 note: PDFs are currently written to a tempfile in /tmp (OS-managed).
+In multi-worker or stateless container deployments, a report generated
+by one worker won't be accessible to another. For production: write the
+resulting PDF to shared storage (S3/GCS/shared volume) and have the
+download endpoint read from that shared location, not local disk.
 """
 import logging
 import os
+import tempfile
 from datetime import datetime, timezone
 
 from workers.celery_app import celery_app
+from db.utils import get_sync_session as _get_sync_session
 
 import structlog
 log = structlog.get_logger(__name__)
-
-REPORT_OUTPUT_DIR = "/tmp/gcaip_reports"
-
-
-def _get_sync_session():
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
-    from config import settings
-    sync_url = settings.DATABASE_URL.replace(
-        "postgresql+asyncpg://", "postgresql+psycopg2://"
-    )
-    engine = create_engine(sync_url, pool_pre_ping=True)
-    return sessionmaker(bind=engine)()
 
 
 @celery_app.task(name="workers.tasks.report_tasks.generate_report_task",
@@ -35,8 +30,6 @@ def generate_report_task(run_id: str) -> dict:
     from models.analysis_run import AnalysisRun
     from models.theme_result import ThemeResult
     from models.risk_score import RiskScore
-
-    os.makedirs(REPORT_OUTPUT_DIR, exist_ok=True)
 
     session = _get_sync_session()
     try:
@@ -51,7 +44,16 @@ def generate_report_task(run_id: str) -> dict:
 
         try:
             from weasyprint import HTML
-            output_path = f"{REPORT_OUTPUT_DIR}/gcaip_report_{run_id}.pdf"
+            # P7 fix: use tempfile so the path is OS-managed and predictable.
+            # TODO(production): after writing, upload to shared storage (S3/GCS)
+            # and return the shared URL. Reading back from local disk will fail
+            # on multi-worker deployments where this worker's /tmp is not shared.
+            with tempfile.NamedTemporaryFile(
+                prefix=f"gcaip_report_{run_id}_",
+                suffix=".pdf",
+                delete=False,
+            ) as tmp:
+                output_path = tmp.name
             HTML(string=html_content).write_pdf(output_path)
             log.info("report_task.generated", path=output_path)
             return {"status": "complete", "path": output_path}

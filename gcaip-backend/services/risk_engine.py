@@ -1,12 +1,14 @@
 """
-Risk Score Engine — weighted composite of all 7 GEE theme results.
+Risk Score Engine — weighted composite of all active GEE theme results.
 
-Weights:
-  Flood Risk Index:      35%
-  Erosion Risk Index:    20%
-  Water Stress Index:    15%
-  Vegetation Health:     15%
-  Land Use Pressure:     15%
+Active theme sub-indices and weights (must sum to 1.0):
+  Water Stress Index:            30% (rainfall + effluent_plume + coastal_outfall)
+  Land Use Pressure:             25% (landuse + pipeline_corridor encroachment)
+  Water/Sanitation Pressure:     25% (effluent_plume + coastal_outfall anomaly max)
+  Infrastructure Integrity:      20% (pipeline_corridor disturbance)
+
+Note: flood_risk, erosion_risk, vegetation_health are computed for completeness when
+those themes are re-enabled, but currently return None (themes inactive).
 
 Score labels: 0-25=LOW, 26-50=MODERATE, 51-75=HIGH, 76-100=CRITICAL
 """
@@ -16,8 +18,10 @@ from dataclasses import dataclass, field
 log = structlog.get_logger(__name__)
 
 WEIGHTS = {
-    "water_stress": 0.50,   # rainfall (active)
-    "landuse": 0.50,        # landuse (active)
+    "water_stress": 0.30,         # rainfall + pollution cross-link (active)
+    "landuse": 0.25,              # landuse + pipeline encroachment (active)
+    "water_sanitation": 0.25,     # effluent_plume + coastal_outfall (active)
+    "infrastructure": 0.20,       # pipeline_corridor disturbance (active)
 }
 
 
@@ -30,6 +34,8 @@ class RiskScore:
     water_stress: float | None
     vegetation_health: float | None
     landuse_pressure: float | None
+    water_sanitation_pressure: float | None = None
+    infrastructure_integrity: float | None = None
     cross_insights: list = field(default_factory=list)
 
 
@@ -44,27 +50,56 @@ class RiskEngine:
         Returns:
             RiskScore dataclass
         """
-        # Active themes only
+        # ── Sub-indices for active themes ─────────────────────────────────────
         water_stress = self._water_stress_index(
-            None,  # reservoir disabled
+            None,  # reservoir is disabled — explicitly None, not a KeyError risk
             results_by_theme.get("rainfall"),
+            results_by_theme.get("effluent_plume"),
+            results_by_theme.get("coastal_outfall"),
         )
-        landuse_pressure = self._landuse_pressure_index(results_by_theme.get("landuse"))
+        landuse_pressure = self._landuse_pressure_index(
+            results_by_theme.get("landuse"),
+            results_by_theme.get("pipeline_corridor"),
+        )
+        water_sanitation_pressure = self._pollution_risk_index(
+            results_by_theme.get("effluent_plume"),
+            results_by_theme.get("coastal_outfall"),
+        )
+        infrastructure_integrity = self._infrastructure_integrity_index(
+            results_by_theme.get("pipeline_corridor"),
+        )
 
+        # ── Composite overall score ───────────────────────────────────────────
+        # All 4 sub-indices from currently active themes are included.
+        # Previously only water_stress + landuse were included (50/50), which
+        # meant a near-maximum pipeline disturbance still showed "LOW" composite.
         overall = (
             water_stress * WEIGHTS["water_stress"]
             + landuse_pressure * WEIGHTS["landuse"]
+            + water_sanitation_pressure * WEIGHTS["water_sanitation"]
+            + infrastructure_integrity * WEIGHTS["infrastructure"]
         )
         overall = min(100.0, max(0.0, overall))
+
+        log.debug(
+            "risk_engine.computed",
+            overall=round(overall, 1),
+            water_stress=round(water_stress, 1),
+            landuse_pressure=round(landuse_pressure, 1),
+            water_sanitation_pressure=round(water_sanitation_pressure, 1),
+            infrastructure_integrity=round(infrastructure_integrity, 1),
+        )
 
         return RiskScore(
             overall_score=round(overall, 1),
             overall_label=self._label(overall),
-            flood_risk=None,
-            erosion_risk=None,
+            flood_risk=None,       # theme inactive
+            erosion_risk=None,     # theme inactive
             water_stress=round(water_stress, 1),
-            vegetation_health=None,
+            vegetation_health=None,  # theme inactive
             landuse_pressure=round(landuse_pressure, 1),
+            water_sanitation_pressure=round(water_sanitation_pressure, 1),
+            infrastructure_integrity=round(infrastructure_integrity, 1),
         )
 
     @staticmethod
@@ -93,8 +128,13 @@ class RiskEngine:
         return base
 
     @staticmethod
-    def _water_stress_index(reservoir_result, rainfall_result) -> float:
-        """Water stress = reservoir fill anomaly + rainfall anomaly combined."""
+    def _water_stress_index(
+        reservoir_result,
+        rainfall_result,
+        effluent_result=None,
+        coastal_result=None,
+    ) -> float:
+        """Water stress = reservoir fill anomaly + rainfall anomaly combined, lightly factoring in pollution anomaly (15%)."""
         score = 0.0
         if reservoir_result and reservoir_result.status == "complete":
             fill = reservoir_result.stats.get("fill_fraction_pct", 50) or 50
@@ -106,6 +146,21 @@ class RiskEngine:
         if rainfall_result and rainfall_result.status == "complete":
             spi = abs(rainfall_result.stats.get("spi_7", 0) or 0)
             score += min(40.0, spi / 3.0 * 40.0)
+
+        # Cross-link: effluent plume / coastal outfall anomaly scores (weighted at 15% of water stress)
+        pollution_score = 0.0
+        pollution_cnt = 0
+        if effluent_result and effluent_result.status == "complete":
+            pollution_score += effluent_result.anomaly_score or 0.0
+            pollution_cnt += 1
+        if coastal_result and coastal_result.status == "complete":
+            pollution_score += coastal_result.anomaly_score or 0.0
+            pollution_cnt += 1
+
+        if pollution_cnt > 0:
+            avg_pollution = pollution_score / pollution_cnt
+            score = (score * 0.85) + (avg_pollution * 0.15)
+
         return min(100.0, score)
 
     @staticmethod
@@ -120,8 +175,8 @@ class RiskEngine:
         return base
 
     @staticmethod
-    def _landuse_pressure_index(result) -> float:
-        """Land use change → runoff increase + area changed."""
+    def _landuse_pressure_index(result, pipeline_result=None) -> float:
+        """Land use change → runoff increase + area changed. Factors in pipeline corridor encroachment if present."""
         if not result or result.status != "complete":
             return 0.0
         runoff_pct = result.stats.get("runoff_increase_pct", 0) or 0
@@ -129,7 +184,31 @@ class RiskEngine:
         # Runoff increase >20% = 60 points; changed area contributes rest
         score = min(60.0, runoff_pct / 20.0 * 60.0)
         score += min(40.0, changed_ha / 500.0 * 40.0)
+
+        # Cross-link: pipeline corridor Dynamic World encroachment overlaps
+        if pipeline_result and pipeline_result.status == "complete":
+            pipeline_encroachment = pipeline_result.stats.get("encroachment_ha", 0.0) or 0.0
+            encroachment_penalty = min(20.0, (pipeline_encroachment / 10.0) * 20.0)
+            score = min(100.0, score + encroachment_penalty)
+
         return min(100.0, score)
+
+    @staticmethod
+    def _pollution_risk_index(effluent_result, coastal_result) -> float:
+        """0-100 pollution risk. Combines effluent plume + coastal outfall anomaly scores."""
+        scores = []
+        if effluent_result and effluent_result.status == "complete":
+            scores.append(effluent_result.anomaly_score or 0.0)
+        if coastal_result and coastal_result.status == "complete":
+            scores.append(coastal_result.anomaly_score or 0.0)
+        return max(scores) if scores else 0.0
+
+    @staticmethod
+    def _infrastructure_integrity_index(pipeline_result) -> float:
+        """0-100 infrastructure integrity score (inverted, higher = more disturbed/at risk)."""
+        if not pipeline_result or pipeline_result.status != "complete":
+            return 0.0
+        return pipeline_result.anomaly_score or 0.0
 
     @staticmethod
     def _label(score: float) -> str:

@@ -11,6 +11,9 @@ export type ThemeId =
   | 'erosion'
   | 'vegetation'
   | 'landuse'
+  | 'effluent_plume'
+  | 'coastal_outfall'
+  | 'pipeline_corridor'
 
 export type ThemeStatus = 'pending' | 'running' | 'complete' | 'failed' | 'skipped'
 
@@ -26,6 +29,7 @@ export interface VisParams {
 
 export interface ThemeResult {
   theme: ThemeId
+  result_id?: string
   status: ThemeStatus
   tile_url: string | null
   tile_url_expires_at: string | null
@@ -40,6 +44,7 @@ export interface ThemeResult {
   data_age_hours: number | null
   data_source: string | null
   error_message: string | null
+  error_class?: 'transient' | 'not_applicable' | 'data_gap' | null
 }
 
 export interface EnrichedContext {
@@ -144,11 +149,17 @@ export const THEME_LABELS: Record<ThemeId, string> = {
   erosion: 'Coastal Erosion',
   vegetation: 'Vegetation Buffer',
   landuse: 'Land Use Change',
+  effluent_plume: 'Effluent Plume',
+  coastal_outfall: 'Coastal Outfall Plume',
+  pipeline_corridor: 'Pipeline Corridor',
 }
 
 export const THEME_ORDER: ThemeId[] = [
   'flood', 'rainfall', 'reservoir', 'mangrove', 'erosion', 'vegetation', 'landuse',
+  'effluent_plume', 'coastal_outfall', 'pipeline_corridor',
 ]
 
-/** Active themes — only these are dispatched and shown in the UI */
-export const ACTIVE_THEMES: ThemeId[] = ['rainfall', 'landuse']
+export const ACTIVE_THEMES: ThemeId[] = [
+  'rainfall', 'landuse',
+  'effluent_plume', 'coastal_outfall', 'pipeline_corridor',
+]

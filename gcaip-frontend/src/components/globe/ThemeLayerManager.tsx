@@ -5,7 +5,8 @@
 import { useEffect, useRef } from 'react'
 import type { Map as MapLibreMap } from 'maplibre-gl'
 import { useAnalysisStore } from '@/store/analysisStore'
-import type { ThemeId } from '@/types/theme'
+import type { ThemeId, ThemeResult } from '@/types/theme'
+import { API_BASE } from '@/api/client'
 
 interface Props {
   map: MapLibreMap
@@ -14,7 +15,41 @@ interface Props {
 export default function ThemeLayerManager({ map }: Props) {
   const themeResults = useAnalysisStore((s) => s.themeResults)
   const mapLayerVisible = useAnalysisStore((s) => s.mapLayerVisible)
-  const addedLayersRef = useRef<Set<ThemeId>>(new Set())
+  const setThemeResult = useAnalysisStore((s) => s.setThemeResult)
+  const addedLayersRef = useRef<Map<ThemeId, string>>(new Map())
+
+  // Tile expiry check loop
+  useEffect(() => {
+    const interval = setInterval(() => {
+      Object.entries(useAnalysisStore.getState().themeResults).forEach(([themeKey, result]) => {
+        if (!result || !result.tile_url || !result.tile_url_expires_at || !result.result_id) return
+        
+        const expiry = new Date(result.tile_url_expires_at).getTime()
+        const now = Date.now()
+        // If expiring in < 5 minutes, refresh
+        if (expiry - now < 5 * 60 * 1000) {
+           fetch(`${API_BASE}/themes/${themeKey}/tile_url/${result.result_id}`)
+             .then(r => r.json())
+             .then(data => {
+                if (data.fresh && data.tile_url) {
+                   const storeState = useAnalysisStore.getState();
+                   const currentResult = storeState.themeResults[themeKey as ThemeId];
+                   if (currentResult) {
+                     setThemeResult(themeKey as ThemeId, {
+                       ...currentResult,
+                       tile_url: data.tile_url,
+                       tile_url_expires_at: data.expires_at
+                     })
+                   }
+                }
+             })
+             .catch(e => console.warn(`Failed to refresh tile for ${themeKey}:`, e))
+        }
+      })
+    }, 60 * 1000) // check every minute
+
+    return () => clearInterval(interval)
+  }, [setThemeResult])
 
   useEffect(() => {
     if (!map) return
@@ -26,11 +61,18 @@ export default function ThemeLayerManager({ map }: Props) {
       const sourceId = `gee-${theme}`
       const layerId = `gee-layer-${theme}`
 
-      if (!addedLayersRef.current.has(theme)) {
+      const prevUrl = addedLayersRef.current.get(theme)
+      if (prevUrl !== result.tile_url) {
         // Defensive: only add if map style is loaded
         if (!map.isStyleLoaded()) return
 
         try {
+          if (prevUrl) {
+            // Remove old layer/source before adding new one
+            if (map.getLayer(layerId)) map.removeLayer(layerId)
+            if (map.getSource(sourceId)) map.removeSource(sourceId)
+          }
+
           map.addSource(sourceId, {
             type: 'raster',
             tiles: [result.tile_url],
@@ -42,9 +84,9 @@ export default function ThemeLayerManager({ map }: Props) {
             source: sourceId,
             paint: { 'raster-opacity': 0.75 },
           })
-          addedLayersRef.current.add(theme)
+          addedLayersRef.current.set(theme, result.tile_url)
         } catch (err) {
-          console.warn(`Failed to add layer for ${theme}:`, err)
+          console.warn(`Failed to add/update layer for ${theme}:`, err)
         }
       }
 
@@ -60,7 +102,7 @@ export default function ThemeLayerManager({ map }: Props) {
   useEffect(() => {
     if (!map) return
     if (Object.keys(themeResults).length === 0) {
-      addedLayersRef.current.forEach((theme) => {
+      addedLayersRef.current.forEach((url, theme) => {
         const layerId = `gee-layer-${theme}`
         const sourceId = `gee-${theme}`
         if (map.getLayer(layerId)) map.removeLayer(layerId)

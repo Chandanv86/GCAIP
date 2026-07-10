@@ -1,25 +1,11 @@
-"""
-Enrichment + risk scoring Celery tasks.
-Called after all theme tasks complete (triggered by _check_run_complete).
-"""
 import json
 import logging
 
 from workers.celery_app import celery_app
+from db.utils import get_sync_session as _get_sync_session
 
 import structlog
 log = structlog.get_logger(__name__)
-
-
-def _get_sync_session():
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
-    from config import settings
-    sync_url = settings.DATABASE_URL.replace(
-        "postgresql+asyncpg://", "postgresql+psycopg2://"
-    )
-    engine = create_engine(sync_url, pool_pre_ping=True)
-    return sessionmaker(bind=engine)()
 
 
 def _publish_event(run_id: str, event: dict) -> None:
@@ -110,6 +96,8 @@ def compute_risk_score_task(run_id: str) -> dict:
             water_stress=risk_score.water_stress,
             vegetation_health=risk_score.vegetation_health,
             landuse_pressure=risk_score.landuse_pressure,
+            water_sanitation_pressure=risk_score.water_sanitation_pressure,
+            infrastructure_integrity=risk_score.infrastructure_integrity,
             cross_insights=[ci.to_dict() for ci in cross_insights],
             population_in_aoi=enrichment.get("population_affected"),
             population_at_risk=enrichment.get("population_affected"),
@@ -132,6 +120,8 @@ def compute_risk_score_task(run_id: str) -> dict:
                 "water_stress": risk_score.water_stress,
                 "vegetation_health": risk_score.vegetation_health,
                 "landuse_pressure": risk_score.landuse_pressure,
+                "water_sanitation_pressure": risk_score.water_sanitation_pressure,
+                "infrastructure_integrity": risk_score.infrastructure_integrity,
                 "cross_insights": [ci.to_dict() for ci in cross_insights],
             },
         })

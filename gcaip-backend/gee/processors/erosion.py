@@ -160,7 +160,7 @@ class ErosionProcessor(BaseThemeProcessor):
             .unmask(0)
             .toFloat()
         )
-        tile_url, expires_at = gee_client.get_tile_url(epr_img, VIS_EROSION)
+        tile_url, expires_at = gee_client.get_tile_url(epr_img.clip(aoi), VIS_EROSION)
 
         confidence = min(1.0, 0.5 + (s1_count + ref_count) * 0.05)
         anomaly_score = min(100.0, abs(mean_epr) / 5.0 * 100.0)  # 5 m/yr = score 100
@@ -222,7 +222,7 @@ class ErosionProcessor(BaseThemeProcessor):
         ndwi = green.subtract(nir).divide(green.add(nir)).rename("NDWI")
         water = ndwi.gt(0.0).rename("water")
         tile_url, expires_at = gee_client.get_tile_url(
-            water, {"min": 0, "max": 1, "palette": ["white", "#1E88E5"]}
+            water.clip(aoi), {"min": 0, "max": 1, "palette": ["white", "#1E88E5"]}
         )
         return ThemeResult(
             theme=self.THEME_NAME,

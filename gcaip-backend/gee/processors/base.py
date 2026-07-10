@@ -39,6 +39,11 @@ class ThemeResult:
     data_source: str
 
     error: str | None = None
+    # 'transient'      → retry may succeed (missing data, quota exceeded)
+    # 'not_applicable' → this theme does not apply to this AOI geometry
+    # 'data_gap'       → data genuinely absent for this region/date (no retry benefit)
+    # None             → success
+    error_class: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to JSON-safe dict for SSE and DB storage."""
@@ -57,6 +62,7 @@ class ThemeResult:
             "data_age_hours": self.data_age_hours,
             "data_source": self.data_source,
             "error": self.error,
+            "error_class": self.error_class,
         }
 
     @classmethod
@@ -64,6 +70,7 @@ class ThemeResult:
         cls,
         theme: str,
         error_message: str,
+        error_class: str = "transient",
     ) -> "ThemeResult":
         """Construct a failed ThemeResult — all fields valid, error non-null."""
         from datetime import timezone
@@ -81,6 +88,37 @@ class ThemeResult:
             data_age_hours=999.0,
             data_source="Error",
             error=error_message,
+            error_class=error_class,
+        )
+
+    @classmethod
+    def not_applicable_result(
+        cls,
+        theme: str,
+        reason: str,
+    ) -> "ThemeResult":
+        """Construct a not-applicable ThemeResult for AOI geometry mismatches.
+        
+        Use when the theme fundamentally cannot apply to the given AOI
+        (e.g. coastal_outfall on an inland AOI), rather than a transient
+        data-availability issue that a retry might fix.
+        """
+        from datetime import timezone
+        return cls(
+            theme=theme,
+            tile_url="",
+            tile_url_expires_at=datetime.now(timezone.utc),
+            vis_params={},
+            metric_value=0.0,
+            metric_unit="",
+            metric_label="Not applicable to this AOI",
+            stats={},
+            anomaly_score=0.0,
+            confidence=0.0,
+            data_age_hours=0.0,
+            data_source="N/A",
+            error=reason,
+            error_class="not_applicable",
         )
 
 

@@ -156,7 +156,7 @@ class ReservoirProcessor(BaseThemeProcessor):
         spillway_risk = self._spillway_risk(fill_fraction_pct, rate_pct_per_day)
 
         # Tile URL
-        tile_url, expires_at = gee_client.get_tile_url(current_water, VIS_RESERVOIR)
+        tile_url, expires_at = gee_client.get_tile_url(current_water.clip(aoi), VIS_RESERVOIR)
 
         anomaly_score = max(0.0, (fill_fraction_pct - 70.0) / 30.0 * 100.0)  # spikes above 70%
 

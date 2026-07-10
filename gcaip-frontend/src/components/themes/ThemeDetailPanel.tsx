@@ -18,15 +18,20 @@ export default function ThemeDetailPanel({ result }: Props) {
   const { stats, enrichment } = result
   const selectedPresetId = useAnalysisStore((s) => s.selectedPresetId)
 
-  // Look up the matching preset zone for validation reference
   const matchedPreset = selectedPresetId
     ? PRESET_ZONES.find((z) => z.id === selectedPresetId)
     : null
 
+  // Retrieve theme-specific expected note if defined in the preset
+  const expectedInfo = matchedPreset?.expected?.[result.theme as keyof typeof matchedPreset.expected]
+  const expectedNote = expectedInfo 
+    ? ('anomaly_note' in expectedInfo ? expectedInfo.anomaly_note : 'changed_area_note' in expectedInfo ? expectedInfo.changed_area_note : 'signal_note' in expectedInfo ? expectedInfo.signal_note : null)
+    : null
+
   return (
     <div className="space-y-3">
-      {/* Validation helper — only visible when AOI came from a preset */}
-      {matchedPreset && (
+      {/* Validation helper — only visible when AOI came from a preset and has expected note */}
+      {!!matchedPreset && !!expectedNote && (
         <div className="flex items-start gap-2 rounded-lg bg-cyan-500/[0.06] px-2.5 py-2 ring-1 ring-cyan-500/15">
           <span className="text-sm shrink-0 mt-px">🔍</span>
           <div>
@@ -34,9 +39,41 @@ export default function ThemeDetailPanel({ result }: Props) {
               Expected Signal
             </p>
             <p className="text-[11px] text-slate-400 leading-relaxed">
-              {matchedPreset.theme_focus}
+              {expectedNote}
             </p>
           </div>
+        </div>
+      )}
+
+      {/* Fallback & Source details */}
+      {stats && !!(stats.cloud_threshold_used || stats.pipeline_vector_source) && (
+        <div className="flex flex-wrap gap-1.5">
+          {!!stats.cloud_threshold_used && Number(stats.cloud_threshold_used) > 40 && (
+            <span className="inline-flex items-center rounded bg-amber-500/10 px-1.5 py-0.5 text-[9px] font-semibold text-amber-500 ring-1 ring-amber-500/20">
+              ⚠️ Coarse Cloud Masking ({String(stats.cloud_threshold_used)}%)
+            </span>
+          )}
+          {!!stats.pipeline_vector_source && (
+            <span className="inline-flex items-center rounded bg-blue-500/10 px-1.5 py-0.5 text-[9px] font-semibold text-blue-400 ring-1 ring-blue-500/20">
+              Vector: {String(stats.pipeline_vector_source).toUpperCase()}
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* Caveats section */}
+      {stats && 'caveats' in stats && Array.isArray(stats.caveats) && stats.caveats.length > 0 && (
+        <div className="rounded-lg bg-yellow-500/[0.03] px-2.5 py-2 ring-1 ring-yellow-500/10">
+          <p className="text-[9px] font-semibold uppercase tracking-wider text-yellow-500/80 mb-1">
+            Data Caveats & Limitations
+          </p>
+          <ul className="list-disc pl-3.5 space-y-0.5">
+            {(stats.caveats as string[]).map((c, i) => (
+              <li key={i} className="text-[10px] text-slate-400 leading-relaxed">
+                {c}
+              </li>
+            ))}
+          </ul>
         </div>
       )}
 

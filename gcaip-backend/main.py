@@ -24,10 +24,30 @@ log = structlog.get_logger()
 async def lifespan(app: FastAPI):
     """Handle startup and shutdown events."""
     log.info("gcaip.startup", version=settings.APP_VERSION, env=settings.ENVIRONMENT)
+
+    # --- Redis startup check ---
+    # Fail fast here so the error is immediately visible in logs,
+    # rather than surfacing as a raw connection error mid-analysis.
+    try:
+        import redis.asyncio as aioredis
+        _r = aioredis.from_url(settings.REDIS_URL, socket_connect_timeout=3)
+        await _r.ping()
+        await _r.aclose()
+        log.info("gcaip.startup.redis_ok", url=settings.REDIS_URL)
+    except Exception as redis_exc:
+        log.error(
+            "gcaip.startup.redis_unavailable",
+            url=settings.REDIS_URL,
+            error=str(redis_exc),
+            hint=(
+                "For Docker Compose: ensure REDIS_URL uses the service name 'redis', not 'localhost'. "
+                "For bare-metal dev: start Redis with 'docker compose up -d redis' from gcaip-backend/."
+            ),
+        )
+        # Do not raise — let the API start in degraded mode so /health still responds.
+        # Celery tasks will fail with clear errors; SSE polling fallback will handle results.
+
     # DB tables are managed by Alembic — do not auto-create here in production.
-    # In dev/test, you may uncomment the line below:
-    # async with engine.begin() as conn:
-    #     await conn.run_sync(Base.metadata.create_all)
     yield
     log.info("gcaip.shutdown")
     await engine.dispose()
