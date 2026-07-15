@@ -21,13 +21,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from models.analysis_run import AnalysisRun
 from models.aoi import AOI
 from config import settings
+from services.theme_registry import ALL_THEMES  # single source of truth for theme list
 
 log = structlog.get_logger(__name__)
 
-ALL_THEMES = [
-    "rainfall", "landuse",
-    "effluent_plume", "coastal_outfall", "pipeline_corridor",
-]
+# ALL_THEMES is now imported from services/theme_registry.py.
+# Do NOT redeclare it here -- add/remove themes in theme_registry.py only.
 
 
 class AnalysisOrchestrator:

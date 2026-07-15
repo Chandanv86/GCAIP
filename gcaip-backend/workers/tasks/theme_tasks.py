@@ -382,8 +382,10 @@ THEME_TASKS = {
     "pipeline_corridor": pipeline_corridor_task,
 }
 
-# Active themes — only these are dispatched by default
-ACTIVE_THEMES = {"rainfall", "landuse", "effluent_plume", "coastal_outfall", "pipeline_corridor"}
+# The canonical theme list lives in services/theme_registry.py::ALL_THEMES.
+# dispatch_all_themes() below is gated by its `themes` parameter (set by the
+# orchestrator after AOIClassifier filtering) -- this file does NOT maintain its
+# own active-theme list. See diagnostic report, Section 4, step 7.
 
 
 def dispatch_all_themes(

@@ -5,10 +5,9 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-VALID_THEMES = [
-    "rainfall", "landuse",
-    "effluent_plume", "coastal_outfall", "pipeline_corridor",
-]
+# VALID_THEMES is the canonical theme list -- defined once in services/theme_registry.py.
+# Import from there; do NOT redeclare it here.
+from services.theme_registry import VALID_THEMES  # noqa: F401 (re-exported for callers)
 
 
 class AnalyzeRequest(BaseModel):

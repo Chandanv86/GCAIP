@@ -51,10 +51,11 @@ class CrossThemeCorrelator:
 
         # ── INACTIVE RULES (themes disabled) ──────────────────────────────────
         # Rules 1, 3, 4, 5, 6 depend on themes (reservoir, flood, erosion, mangrove)
-        # that are NOT in ACTIVE_THEMES (workers/tasks/theme_tasks.py). Their
-        # stats dicts will always be empty {}, so their conditions can never fire.
-        # They are preserved here for when those themes are re-enabled.
-        # See ACTIVE_THEMES = {"rainfall","landuse","effluent_plume","coastal_outfall","pipeline_corridor"}
+        # that are not yet in the active theme set (services/theme_registry.py::ALL_THEMES).
+        # Their stats dicts will always be empty {}, so their conditions can never fire.
+        # They are preserved here for when those themes are re-enabled (Section 5 of
+        # diagnostic report). Once flood/reservoir/erosion/mangrove are added to the
+        # registry, these rules start firing automatically with no further code changes.
         # ───────────────────────────────────────────────────────────────────────────
 
         # ── Rule 1 [INACTIVE — requires: reservoir + rainfall] ──────────────

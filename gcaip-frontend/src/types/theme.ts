@@ -159,6 +159,13 @@ export const THEME_ORDER: ThemeId[] = [
   'effluent_plume', 'coastal_outfall', 'pipeline_corridor',
 ]
 
+/**
+ * Active themes dispatched by the orchestrator by default.
+ * CANONICAL DEFINITION: gcaip-backend/services/theme_registry.py::ALL_THEMES
+ * Keep this list manually in sync with that file. The backend validates all
+ * theme IDs against the registry -- if you add a theme here without adding it
+ * to theme_registry.py, the backend will reject the request with a 422 error.
+ */
 export const ACTIVE_THEMES: ThemeId[] = [
   'rainfall', 'landuse',
   'effluent_plume', 'coastal_outfall', 'pipeline_corridor',
