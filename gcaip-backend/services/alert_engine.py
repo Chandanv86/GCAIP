@@ -136,15 +136,16 @@ class AlertEngine:
 
         # Map theme → applicable rules (only active themes)
         theme_rule_map = {
+            "flood": ["flood_active"],
             "rainfall": ["extreme_rainfall"],
+            "reservoir": ["spillway_risk"],
+            "erosion": ["erosion_storm"],
+            "vegetation": [],          # no alert rule yet — runs but fires no alerts
+            "mangrove": ["mangrove_loss"],
+            "landuse": [],             # monitored in risk_engine; no standalone alert rule
             "effluent_plume": ["effluent_plume_detected"],
             "coastal_outfall": ["thermal_plume_active", "spm_spike", "oil_sheen_detected"],
             "pipeline_corridor": ["corridor_encroachment", "corridor_disturbance"],
-            # Disabled themes — re-enable when themes are activated:
-            # "flood": ["flood_active"],
-            # "reservoir": ["spillway_risk"],
-            # "erosion": ["erosion_storm"],
-            # "mangrove": ["mangrove_loss"],
         }
 
         for theme_name, rule_ids in theme_rule_map.items():

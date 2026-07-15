@@ -30,11 +30,18 @@ class ThemeSpec:
 # Order matters: it controls display order in the UI (THEME_ORDER in theme.ts
 # mirrors this list). Add new themes at the end to avoid reordering existing UI.
 THEME_REGISTRY: list[ThemeSpec] = [
-    ThemeSpec("rainfall",           always_on=True),
-    ThemeSpec("landuse",            always_on=True),
-    ThemeSpec("effluent_plume",     always_on=False),   # gated: needs water body
-    ThemeSpec("coastal_outfall",    always_on=False),   # gated: needs coastal water
-    ThemeSpec("pipeline_corridor",  always_on=False),   # gated: needs pipeline nearby
+    # --- Always-on themes (dispatched for every AOI) ---
+    ThemeSpec("flood",              always_on=True),    # S1 SAR flood extent
+    ThemeSpec("rainfall",          always_on=True),    # GPM IMERG rainfall anomaly
+    ThemeSpec("reservoir",         always_on=True),    # JRC + S1 reservoir fill
+    ThemeSpec("erosion",           always_on=True),    # SAR shoreline erosion rate
+    ThemeSpec("vegetation",        always_on=True),    # S2 NDVI vegetation buffer
+    ThemeSpec("landuse",           always_on=True),    # Dynamic World land use change
+    # --- Gated themes (dispatched only when AOIClassifier confirms relevance) ---
+    ThemeSpec("mangrove",          always_on=False),   # gated: needs mangrove zone
+    ThemeSpec("effluent_plume",   always_on=False),   # gated: needs water body
+    ThemeSpec("coastal_outfall",  always_on=False),   # gated: needs coastal water
+    ThemeSpec("pipeline_corridor",always_on=False),   # gated: needs pipeline nearby
 ]
 
 # ---------------------------------------------------------------------------

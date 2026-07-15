@@ -155,8 +155,8 @@ export const THEME_LABELS: Record<ThemeId, string> = {
 }
 
 export const THEME_ORDER: ThemeId[] = [
-  'flood', 'rainfall', 'reservoir', 'mangrove', 'erosion', 'vegetation', 'landuse',
-  'effluent_plume', 'coastal_outfall', 'pipeline_corridor',
+  'flood', 'rainfall', 'reservoir', 'erosion', 'vegetation', 'landuse',
+  'mangrove', 'effluent_plume', 'coastal_outfall', 'pipeline_corridor',
 ]
 
 /**
@@ -167,6 +167,8 @@ export const THEME_ORDER: ThemeId[] = [
  * to theme_registry.py, the backend will reject the request with a 422 error.
  */
 export const ACTIVE_THEMES: ThemeId[] = [
-  'rainfall', 'landuse',
-  'effluent_plume', 'coastal_outfall', 'pipeline_corridor',
+  // Always-on (dispatched for every AOI)
+  'flood', 'rainfall', 'reservoir', 'erosion', 'vegetation', 'landuse',
+  // Gated (dispatched when AOIClassifier confirms relevance)
+  'mangrove', 'effluent_plume', 'coastal_outfall', 'pipeline_corridor',
 ]

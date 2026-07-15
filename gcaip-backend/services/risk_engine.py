@@ -1,28 +1,22 @@
-"""
-Risk Score Engine — weighted composite of all active GEE theme results.
-
-Active theme sub-indices and weights (must sum to 1.0):
-  Water Stress Index:            30% (rainfall + effluent_plume + coastal_outfall)
-  Land Use Pressure:             25% (landuse + pipeline_corridor encroachment)
-  Water/Sanitation Pressure:     25% (effluent_plume + coastal_outfall anomaly max)
-  Infrastructure Integrity:      20% (pipeline_corridor disturbance)
-
-Note: flood_risk, erosion_risk, vegetation_health are computed for completeness when
-those themes are re-enabled, but currently return None (themes inactive).
-
-Score labels: 0-25=LOW, 26-50=MODERATE, 51-75=HIGH, 76-100=CRITICAL
-"""
+"""docstring"""
 import structlog
 from dataclasses import dataclass, field
 
 log = structlog.get_logger(__name__)
 
+# 7-theme weight distribution (sums to 1.0).
+# Diagnostic report Section 5 starting point — tune after real runs.
 WEIGHTS = {
-    "water_stress": 0.30,         # rainfall + pollution cross-link (active)
-    "landuse": 0.25,              # landuse + pipeline encroachment (active)
-    "water_sanitation": 0.25,     # effluent_plume + coastal_outfall (active)
-    "infrastructure": 0.20,       # pipeline_corridor disturbance (active)
+    "flood":             0.20,   # flood extent + active flag
+    "erosion":           0.15,   # shoreline EPR + storm wave risk
+    "water_stress":      0.20,   # reservoir + rainfall + pollution cross-link
+    "landuse":           0.15,   # land use pressure + pipeline encroachment
+    "vegetation":        0.10,   # inverted vegetation health
+    "water_sanitation": 0.12,   # effluent_plume + coastal_outfall anomaly
+    "infrastructure":   0.08,   # pipeline corridor disturbance
 }
+
+assert abs(sum(WEIGHTS.values()) - 1.0) < 1e-9, f"WEIGHTS must sum to 1.0, got {sum(WEIGHTS.values())}"
 
 
 @dataclass
@@ -50,9 +44,12 @@ class RiskEngine:
         Returns:
             RiskScore dataclass
         """
-        # ── Sub-indices for active themes ─────────────────────────────────────
+        # ── Sub-indices for all active themes ────────────────────────────────────
+        flood_risk = self._flood_risk_index(results_by_theme.get("flood"))
+        erosion_risk = self._erosion_risk_index(results_by_theme.get("erosion"))
+        vegetation_health = self._vegetation_health_index(results_by_theme.get("vegetation"))
         water_stress = self._water_stress_index(
-            None,  # reservoir is disabled — explicitly None, not a KeyError risk
+            results_by_theme.get("reservoir"),
             results_by_theme.get("rainfall"),
             results_by_theme.get("effluent_plume"),
             results_by_theme.get("coastal_outfall"),
@@ -69,34 +66,38 @@ class RiskEngine:
             results_by_theme.get("pipeline_corridor"),
         )
 
-        # ── Composite overall score ───────────────────────────────────────────
-        # All 4 sub-indices from currently active themes are included.
-        # Previously only water_stress + landuse were included (50/50), which
-        # meant a near-maximum pipeline disturbance still showed "LOW" composite.
+        # ── Composite overall score ─────────────────────────────────────────
+        # 7 weighted sub-indices. See WEIGHTS at module top.
         overall = (
-            water_stress * WEIGHTS["water_stress"]
-            + landuse_pressure * WEIGHTS["landuse"]
+            flood_risk            * WEIGHTS["flood"]
+            + erosion_risk        * WEIGHTS["erosion"]
+            + water_stress        * WEIGHTS["water_stress"]
+            + landuse_pressure    * WEIGHTS["landuse"]
+            + vegetation_health   * WEIGHTS["vegetation"]
             + water_sanitation_pressure * WEIGHTS["water_sanitation"]
-            + infrastructure_integrity * WEIGHTS["infrastructure"]
+            + infrastructure_integrity  * WEIGHTS["infrastructure"]
         )
         overall = min(100.0, max(0.0, overall))
 
         log.debug(
             "risk_engine.computed",
             overall=round(overall, 1),
+            flood_risk=round(flood_risk, 1),
+            erosion_risk=round(erosion_risk, 1),
             water_stress=round(water_stress, 1),
             landuse_pressure=round(landuse_pressure, 1),
-            water_sanitation_pressure=round(water_sanitation_pressure, 1),
-            infrastructure_integrity=round(infrastructure_integrity, 1),
+            vegetation_health=round(vegetation_health, 1),
+            water_sanitation=round(water_sanitation_pressure, 1),
+            infrastructure=round(infrastructure_integrity, 1),
         )
 
         return RiskScore(
             overall_score=round(overall, 1),
             overall_label=self._label(overall),
-            flood_risk=None,       # theme inactive
-            erosion_risk=None,     # theme inactive
+            flood_risk=round(flood_risk, 1),
+            erosion_risk=round(erosion_risk, 1),
             water_stress=round(water_stress, 1),
-            vegetation_health=None,  # theme inactive
+            vegetation_health=round(vegetation_health, 1),
             landuse_pressure=round(landuse_pressure, 1),
             water_sanitation_pressure=round(water_sanitation_pressure, 1),
             infrastructure_integrity=round(infrastructure_integrity, 1),
