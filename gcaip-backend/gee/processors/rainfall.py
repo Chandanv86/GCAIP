@@ -267,8 +267,8 @@ class RainfallProcessor(BaseThemeProcessor):
         anomaly_score = min(100.0, abs(spi_7) / 3.0 * 100.0)
 
         metric_label = (
-            f"{accum_7d:.0f}mm in 7 days (normal: {clim_7d['mean']:.0f}mm, "
-            f"{anomaly_7d_pct:+.0f}%)"
+            f"{accum_7d:.1f}mm in 7 days (normal: {clim_7d['mean']:.1f}mm, "
+            f"{anomaly_7d_pct:+.1f}%)"
         )
 
         # Bug 6: Compute actual age

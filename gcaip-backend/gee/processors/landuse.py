@@ -262,7 +262,7 @@ class LandUseProcessor(BaseThemeProcessor):
             vis_params=VIS_LANDUSE,
             metric_value=changed_area_ha,
             metric_unit="ha",
-            metric_label=f"{changed_area_ha:,.0f} ha land use change detected",
+            metric_label=f"{changed_area_ha:,.1f} ha land use change detected",
             stats={
                 "changed_area_ha": round(changed_area_ha, 1),
                 "transitions": {
