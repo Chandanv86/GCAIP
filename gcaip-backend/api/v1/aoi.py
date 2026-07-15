@@ -83,6 +83,7 @@ async def create_aoi(
         admin_level1=admin1,
         admin_level2=admin2,
         is_public=False,
+        tags=body.properties or {},  # persist outfall_point / buffer_m / pipeline_geometry
     )
     db.add(aoi)
     await db.commit()

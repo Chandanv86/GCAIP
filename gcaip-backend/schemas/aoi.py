@@ -14,6 +14,14 @@ class AOICreateRequest(BaseModel):
         description="GeoJSON Feature, FeatureCollection, or Geometry (Polygon/MultiPolygon)",
     )
     name: str | None = Field(None, max_length=512)
+    properties: dict | None = Field(
+        None,
+        description=(
+            "Optional AOI-level metadata merged into aoi.tags. "
+            "Recognised keys: outfall_point (GeoJSON Point), buffer_m (int), "
+            "pipeline_geometry (GeoJSON LineString/MultiLineString)."
+        ),
+    )
 
     @field_validator("geojson")
     @classmethod

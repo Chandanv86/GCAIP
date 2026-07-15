@@ -1,6 +1,14 @@
 """
-Analysis Orchestrator — creates a run record and dispatches all 7 GEE theme tasks.
+Analysis Orchestrator — creates a run record and dispatches all GEE theme tasks.
 This is the entry point called by the /analyze API endpoint.
+
+STEP 1 CHANGE (diagnostic report, Section 4, steps 1-3):
+  - AOIClassifier is called BEFORE ThemeResult rows are created.
+  - Skipped themes get a pre-written ThemeResult (status="skipped",
+    error_class="not_applicable") rather than a dispatched Celery task.
+  - If ALL requested themes are skipped, compute_risk_score_task is
+    triggered directly so the run never gets stuck at status="running".
+  - Both async and sync paths are handled.
 """
 import hashlib
 import json
@@ -43,8 +51,25 @@ class AnalysisOrchestrator:
         Returns:
             run_id: UUID string for the created analysis run
         """
+        import asyncio
         start_date, end_date = date_range or self._default_date_range()
         themes = themes or ALL_THEMES
+
+        # ── AOI classification (MUST be in executor — makes blocking GEE/HTTP calls) ──
+        from services.aoi_classifier import AOIClassifier
+        loop = asyncio.get_event_loop()
+        try:
+            profile = await loop.run_in_executor(
+                None, AOIClassifier().classify, aoi_geojson
+            )
+            # Annotate aoi_geojson with found pipeline geometry so
+            # pipeline_corridor.py's tier-1 OSM path actually fires.
+            aoi_geojson = profile.annotate_aoi_geojson(aoi_geojson)
+        except Exception as clf_exc:
+            # Classifier is best-effort — if it fails, run all themes normally
+            # rather than blocking analysis entirely.
+            log.warning("orchestrator.classifier_failed", error=str(clf_exc))
+            profile = None
 
         # ── Create run record ────────────────────────────────────────────────
         run = AnalysisRun(
@@ -56,17 +81,30 @@ class AnalysisOrchestrator:
             started_at=datetime.now(timezone.utc),
         )
         db.add(run)
-        await db.flush()  # Flush to populate run.id before referencing it as a foreign key
-        
-        # Pre-create pending ThemeResult rows asynchronously
+        await db.flush()  # populate run.id before referencing it as a foreign key
+
+        # ── Pre-create ThemeResult rows (skipped or pending) ────────────────
         from models.theme_result import ThemeResult
+        skipped = profile.skipped_themes if profile else {}
+        dispatch_themes = []
+
         for theme_name in themes:
-            db.add(ThemeResult(
-                run_id=run.id,
-                theme=theme_name,
-                status="pending",
-            ))
-            
+            if theme_name in skipped:
+                db.add(ThemeResult(
+                    run_id=run.id,
+                    theme=theme_name,
+                    status="skipped",
+                    error_class="not_applicable",
+                    error_message=skipped[theme_name],
+                    metric_label="Not applicable to this AOI",
+                    confidence=0.0,
+                    data_age_hours=0.0,
+                    completed_at=datetime.now(timezone.utc),
+                ))
+            else:
+                db.add(ThemeResult(run_id=run.id, theme=theme_name, status="pending"))
+                dispatch_themes.append(theme_name)
+
         await db.commit()
         await db.refresh(run)
         run_id = str(run.id)
@@ -74,46 +112,58 @@ class AnalysisOrchestrator:
         # ── Cache key from AOI geometry + date range ─────────────────────────
         cache_key = self._make_cache_key(aoi_geojson, start_date, end_date)
 
-        # ── Dispatch GEE tasks in parallel ───────────────────────────────────
-        from workers.tasks.theme_tasks import dispatch_all_themes
-        try:
-            dispatch_all_themes(
+        # ── Dispatch or trigger risk score directly if all themes skipped ────
+        if not dispatch_themes:
+            # Edge case: every requested theme was classified as not-applicable.
+            # _check_run_complete() only runs inside a Celery task, so if no
+            # task fires, the run would be stuck at status="running" forever.
+            log.info(
+                "orchestrator.all_themes_skipped",
                 run_id=run_id,
-                aoi_geojson=aoi_geojson,
-                date_range=(start_date, end_date),
-                themes=themes,
-                cache_key=cache_key,
+                skipped=list(skipped.keys()),
             )
-        except Exception as broker_exc:
-            err_str = str(broker_exc).lower()
-            if "connection refused" in err_str or "111" in err_str or "redis" in err_str:
-                # Mark the run as failed so it doesn't stay stuck at 'running'
-                from sqlalchemy import update
-                from models.analysis_run import AnalysisRun as _Run
-                await db.execute(
-                    update(_Run)
-                    .where(_Run.id == run.id)
-                    .values(status="failed")
+            from workers.tasks.enrichment_tasks import compute_risk_score_task
+            compute_risk_score_task.delay(run_id)
+        else:
+            from workers.tasks.theme_tasks import dispatch_all_themes
+            try:
+                dispatch_all_themes(
+                    run_id=run_id,
+                    aoi_geojson=aoi_geojson,
+                    date_range=(start_date, end_date),
+                    themes=dispatch_themes,
+                    cache_key=cache_key,
                 )
-                await db.commit()
-                from fastapi import HTTPException
-                raise HTTPException(
-                    status_code=503,
-                    detail=(
-                        "Redis task broker is unreachable. "
-                        "The analysis job queue cannot start. "
-                        f"Configured broker: {settings.CELERY_BROKER_URL}. "
-                        "For Docker Compose deployments: verify CELERY_BROKER_URL uses "
-                        "the service name 'redis' (not 'localhost'). "
-                        "For bare-metal dev: run 'docker compose up -d redis' in gcaip-backend/."
-                    ),
-                )
-            raise  # non-broker error — let the global handler deal with it
+            except Exception as broker_exc:
+                err_str = str(broker_exc).lower()
+                if "connection refused" in err_str or "111" in err_str or "redis" in err_str:
+                    from sqlalchemy import update
+                    from models.analysis_run import AnalysisRun as _Run
+                    await db.execute(
+                        update(_Run)
+                        .where(_Run.id == run.id)
+                        .values(status="failed")
+                    )
+                    await db.commit()
+                    from fastapi import HTTPException
+                    raise HTTPException(
+                        status_code=503,
+                        detail=(
+                            "Redis task broker is unreachable. "
+                            "The analysis job queue cannot start. "
+                            f"Configured broker: {settings.CELERY_BROKER_URL}. "
+                            "For Docker Compose deployments: verify CELERY_BROKER_URL uses "
+                            "the service name 'redis' (not 'localhost'). "
+                            "For bare-metal dev: run 'docker compose up -d redis' in gcaip-backend/."
+                        ),
+                    )
+                raise  # non-broker error — let the global handler deal with it
 
         log.info(
             "orchestrator.dispatched",
             run_id=run_id,
-            themes=themes,
+            dispatched=dispatch_themes,
+            skipped=list(skipped.keys()),
             date_range=(start_date, end_date),
         )
         return run_id
@@ -130,6 +180,15 @@ class AnalysisOrchestrator:
         start_date, end_date = date_range or self._default_date_range()
         themes = themes or ALL_THEMES
 
+        # ── AOI classification (no executor needed — already in a worker process) ──
+        from services.aoi_classifier import AOIClassifier
+        try:
+            profile = AOIClassifier().classify(aoi_geojson)
+            aoi_geojson = profile.annotate_aoi_geojson(aoi_geojson)
+        except Exception as clf_exc:
+            log.warning("orchestrator.classifier_failed", error=str(clf_exc))
+            profile = None
+
         from sqlalchemy import create_engine
         from sqlalchemy.orm import sessionmaker
         sync_url = settings.DATABASE_URL.replace(
@@ -138,6 +197,9 @@ class AnalysisOrchestrator:
         engine = create_engine(sync_url, pool_pre_ping=True)
         Session = sessionmaker(bind=engine)
         session = Session()
+
+        skipped = profile.skipped_themes if profile else {}
+        dispatch_themes = []
 
         try:
             run = AnalysisRun(
@@ -149,31 +211,52 @@ class AnalysisOrchestrator:
                 started_at=datetime.now(timezone.utc),
             )
             session.add(run)
-            session.flush()  # Flush to populate run.id before referencing it as a foreign key
-            
-            # Pre-create pending ThemeResult rows synchronously
+            session.flush()
+
             from models.theme_result import ThemeResult
             for theme_name in themes:
-                session.add(ThemeResult(
-                    run_id=run.id,
-                    theme=theme_name,
-                    status="pending",
-                ))
-                
+                if theme_name in skipped:
+                    session.add(ThemeResult(
+                        run_id=run.id,
+                        theme=theme_name,
+                        status="skipped",
+                        error_class="not_applicable",
+                        error_message=skipped[theme_name],
+                        metric_label="Not applicable to this AOI",
+                        confidence=0.0,
+                        data_age_hours=0.0,
+                        completed_at=datetime.now(timezone.utc),
+                    ))
+                else:
+                    session.add(ThemeResult(
+                        run_id=run.id, theme=theme_name, status="pending"
+                    ))
+                    dispatch_themes.append(theme_name)
+
             session.commit()
             run_id = str(run.id)
         finally:
             session.close()
 
         cache_key = self._make_cache_key(aoi_geojson, start_date, end_date)
-        from workers.tasks.theme_tasks import dispatch_all_themes
-        dispatch_all_themes(
-            run_id=run_id,
-            aoi_geojson=aoi_geojson,
-            date_range=(start_date, end_date),
-            themes=themes,
-            cache_key=cache_key,
-        )
+
+        if not dispatch_themes:
+            log.info(
+                "orchestrator.all_themes_skipped",
+                run_id=run_id,
+                skipped=list(skipped.keys()),
+            )
+            from workers.tasks.enrichment_tasks import compute_risk_score_task
+            compute_risk_score_task.delay(run_id)
+        else:
+            from workers.tasks.theme_tasks import dispatch_all_themes
+            dispatch_all_themes(
+                run_id=run_id,
+                aoi_geojson=aoi_geojson,
+                date_range=(start_date, end_date),
+                themes=dispatch_themes,
+                cache_key=cache_key,
+            )
         return run_id
 
     @staticmethod

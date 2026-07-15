@@ -56,13 +56,18 @@ async def trigger_analysis(
     # Extract AOI GeoJSON
     aoi_geojson = mapping(to_shape(aoi.geom))
 
+    # Inject user-supplied metadata (outfall_point, buffer_m, pipeline_geometry)
+    # stored in aoi.tags back into aoi_geojson["properties"] so processors can
+    # read them. mapping() returns a bare Geometry dict (no "properties" key).
+    aoi_geojson = {**dict(aoi_geojson), "properties": dict(aoi.tags or {})}
+
     start_date, end_date = body.get_date_range()
     themes = body.get_themes()
 
     run_id = await _orchestrator.dispatch_async(
         db=db,
         aoi_id=str(body.aoi_id),
-        aoi_geojson=dict(aoi_geojson),
+        aoi_geojson=aoi_geojson,
         date_range=(start_date, end_date),
         themes=themes,
         triggered_by="user",
