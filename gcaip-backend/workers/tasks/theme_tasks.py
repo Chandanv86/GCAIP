@@ -61,11 +61,18 @@ def _publish_theme_event(run_id: str, theme: str, result_dict: dict) -> None:
         )
 
 
-def _store_theme_result(run_id: str, theme: str, result) -> None:
-    """Persist ThemeResult to the theme_results table."""
+def _store_theme_result(run_id: str, theme: str, result) -> str | None:
+    """Persist ThemeResult to the theme_results table.
+
+    Returns the aoi_id of the parent AnalysisRun so the timeseries writer can
+    use it without a second DB round-trip. Returns None on any lookup failure
+    (soft-fail -- timeseries write will be skipped, analysis run is unaffected).
+    """
     from models.theme_result import ThemeResult as ThemeResultModel
+    from models.analysis_run import AnalysisRun
 
     session = _get_sync_session()
+    aoi_id: str | None = None
     try:
         obj = (
             session.query(ThemeResultModel)
@@ -97,12 +104,18 @@ def _store_theme_result(run_id: str, theme: str, result) -> None:
         obj.completed_at = now
 
         session.commit()
+
+        # Fetch aoi_id for the timeseries writer -- soft-fail if row missing
+        run_row = session.query(AnalysisRun).filter_by(id=run_id).first()
+        if run_row:
+            aoi_id = str(run_row.aoi_id)
     except Exception as exc:
         session.rollback()
         log.error("theme_task.store_error", theme=theme, error=str(exc))
         raise
     finally:
         session.close()
+    return aoi_id
 
 
 def _check_run_complete(run_id: str) -> bool:
@@ -261,7 +274,32 @@ def _run_theme(processor_cls, theme: str, run_id: str, aoi_geojson: dict,
                 note="Result not cached; will recompute on next identical request",
             )
 
-    _store_theme_result(run_id, theme, result)
+    aoi_id = _store_theme_result(run_id, theme, result)
+
+    # Timeseries write -- soft-fail, never breaks parent run
+    if aoi_id and not result.error:
+        try:
+            from services.timeseries_writer import write_theme_metrics
+            ts_session = _get_sync_session()
+            try:
+                write_theme_metrics(
+                    session=ts_session,
+                    aoi_id=aoi_id,
+                    theme=theme,
+                    observed_at=datetime.now(timezone.utc),
+                    stats={**(result.stats or {}), "_primary_metric": result.metric_value},
+                    confidence=result.confidence,
+                    data_source=result.data_source,
+                )
+            finally:
+                ts_session.close()
+        except Exception as ts_exc:
+            log.warning(
+                "theme_task.timeseries_write_failed",
+                theme=theme, aoi_id=aoi_id, error=str(ts_exc),
+                note="Timeseries write failed; analysis run unaffected",
+            )
+
     _publish_theme_event(run_id, theme, result_dict)
     _check_run_complete(run_id)
     return result_dict

@@ -11,14 +11,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.deps import get_db
 from models.theme_result import ThemeResult
+# VALID_THEMES is now the canonical list from theme_registry.py.
+# Do NOT redeclare it here.
+from schemas.analysis import VALID_THEMES
 
 router = APIRouter()
-
-VALID_THEMES = [
-    "flood", "rainfall", "reservoir",
-    "mangrove", "erosion", "vegetation", "landuse",
-    "effluent_plume", "coastal_outfall", "pipeline_corridor",
-]
 
 
 @router.get("/pipelines/search")
@@ -212,3 +209,68 @@ def _theme_default_unit(theme: str) -> str:
         "effluent_plume": "km²", "coastal_outfall": "km²",
         "pipeline_corridor": "m",
     }.get(theme, "")
+
+
+@router.get("/themes/{theme}/yearly/{aoi_id}")
+async def get_theme_yearly_trend(
+    theme: str,
+    aoi_id: uuid.UUID,
+    metric_name: str = Query(..., description="Which stat key to chart (e.g. 'spi_7' for rainfall, 'changed_area_ha' for landuse)."),
+    years_back: int = Query(5, ge=1, le=20, description="How many years of data to include."),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """
+    Year-over-year trend for a given theme metric, backed by the
+    metric_timeseries hypertable. Returns rows shaped for Recharts:
+      [{"year": 2022, "avg_value": .., "min_value": .., "max_value": ..,
+        "sample_count": .., "avg_confidence": ..}, ...]
+
+    NOTE: Charts only have data from the point `write_theme_metrics` was
+    deployed (or after a backfill from existing theme_results rows --
+    see scripts/backfill_timeseries.py recommendation in diagnostic report).
+    """
+    if theme not in VALID_THEMES:
+        raise HTTPException(status_code=400, detail=f"Invalid theme '{theme}'. Must be one of: {VALID_THEMES}")
+
+    from services.timeseries_writer import get_yearly_trend, get_available_metric_names
+    from db.utils import get_sync_session
+    sync_session = get_sync_session()
+    try:
+        rows = get_yearly_trend(sync_session, str(aoi_id), theme, metric_name, years_back)
+        available_metrics = get_available_metric_names(sync_session, str(aoi_id), theme)
+    finally:
+        sync_session.close()
+
+    return {
+        "aoi_id": str(aoi_id),
+        "theme": theme,
+        "metric": metric_name,
+        "years_back": years_back,
+        "unit": _theme_default_unit(theme),
+        "years": rows,
+        "available_metrics": available_metrics,
+    }
+
+
+@router.get("/themes/{theme}/yearly/{aoi_id}/metrics")
+async def get_theme_metric_names(
+    theme: str,
+    aoi_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """
+    List all metric names available in metric_timeseries for this AOI + theme.
+    Used to populate a frontend metric picker dropdown for the yearly chart.
+    """
+    if theme not in VALID_THEMES:
+        raise HTTPException(status_code=400, detail=f"Invalid theme '{theme}'.")
+
+    from services.timeseries_writer import get_available_metric_names
+    from db.utils import get_sync_session
+    sync_session = get_sync_session()
+    try:
+        metrics = get_available_metric_names(sync_session, str(aoi_id), theme)
+    finally:
+        sync_session.close()
+
+    return {"aoi_id": str(aoi_id), "theme": theme, "available_metrics": metrics}
