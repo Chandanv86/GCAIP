@@ -24,6 +24,7 @@ import ee
 from gee import client as gee_client
 from gee.client import GEEAssetNotFoundError, GEEQuotaError
 from gee.processors.base import BaseThemeProcessor, ThemeResult
+from services.adaptive_thresholds import self_relative_anomaly_mask
 
 log = structlog.get_logger(__name__)
 
@@ -88,7 +89,22 @@ class EffluentPlumeProcessor(BaseThemeProcessor):
         ndci = current.normalizedDifference(["B5", "B4"]).rename("ndci")
         ndti = current.normalizedDifference(["B4", "B3"]).rename("ndti")
 
-        plume_mask = ndci.gt(NDCI_THRESHOLD).And(ndti.gt(NDTI_THRESHOLD)).And(water_mask)
+        plume_mask_fixed = ndci.gt(NDCI_THRESHOLD).And(ndti.gt(NDTI_THRESHOLD)).And(water_mask)
+
+        # Additive: OR in a self-relative (AOI-specific-percentile) NDTI mask so
+        # naturally high-baseline rivers (Sundarbans-style) can still detect a real
+        # local discharge without raising the fixed global threshold.
+        # This NEVER replaces the fixed-threshold mask — only adds to it.
+        relative_ndti_mask = self_relative_anomaly_mask(
+            ndti, "ndti", aoi, water_mask,
+            baseline_percentile=50, anomaly_percentile=90, scale=10,
+        )
+        if relative_ndti_mask is not None:
+            plume_mask = plume_mask_fixed.Or(relative_ndti_mask).And(water_mask)
+            relative_triggered = True
+        else:
+            plume_mask = plume_mask_fixed
+            relative_triggered = False
 
         # --- Baseline (prior-year seasonal composite, same sensor) ---
         ref_start, ref_end = self.get_reference_period(end, years_back=1)
@@ -195,6 +211,7 @@ class EffluentPlumeProcessor(BaseThemeProcessor):
                 "source_collection": source_label,
                 "cloud_threshold_used": cloud_threshold_used,
                 "baseline_available": baseline_available,
+                "relative_threshold_triggered": relative_triggered,
                 "caveats": [
                     "SPM/CDOM proxies use S2 harmonized SR without a secondary "
                     "C2RCC/ACOLITE water-leaving-radiance correction.",

@@ -92,6 +92,14 @@ THRESHOLDS = {
         "message_tpl": "Pipeline corridor disturbed length has reached {disturbed_corridor_length_m:.0f} meters.",
         "confidence_min": 0.6,
     },
+    "oil_sheen_detected": {
+        "condition": lambda s: s.get("oil_sheen_km2", 0) >= 0.05,
+        "severity": "WARNING",
+        "alert_type": "oil_sheen_detected",
+        "title_tpl": "POSSIBLE OIL/SURFACTANT SHEEN: {aoi_name}",
+        "message_tpl": "SAR surface-dampening consistent with an oil sheen detected over {oil_sheen_km2:.2f} km².",
+        "confidence_min": 0.5,
+    },
 }
 
 
@@ -130,7 +138,7 @@ class AlertEngine:
         theme_rule_map = {
             "rainfall": ["extreme_rainfall"],
             "effluent_plume": ["effluent_plume_detected"],
-            "coastal_outfall": ["thermal_plume_active", "spm_spike"],
+            "coastal_outfall": ["thermal_plume_active", "spm_spike", "oil_sheen_detected"],
             "pipeline_corridor": ["corridor_encroachment", "corridor_disturbance"],
             # Disabled themes — re-enable when themes are activated:
             # "flood": ["flood_active"],

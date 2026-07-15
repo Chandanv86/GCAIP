@@ -22,6 +22,7 @@ import ee
 from gee import client as gee_client
 from gee.client import GEEAssetNotFoundError, GEEQuotaError
 from gee.processors.base import BaseThemeProcessor, ThemeResult
+from services.adaptive_thresholds import sar_oil_sheen_mask
 
 log = structlog.get_logger(__name__)
 
@@ -212,6 +213,50 @@ class CoastalOutfallProcessor(BaseThemeProcessor):
 
         thermal_result = self._thermal_plume_analysis(aoi, start, end, water_mask)
 
+        # --- SAR oil-sheen detection (independent of SPM/CDOM, surfaces as own stat) ---
+        # Pattern reused from erosion.py: ERA5-Land u/v -> sqrt(u^2 + v^2) m/s.
+        # S1 collection reuses the same IW/VV filter pattern as pipeline_corridor.py.
+        oil_sheen_km2 = 0.0
+        oil_sheen_diagnostics: dict = {"sar_oil_sheen_checked": False}
+        try:
+            era5_wind = (
+                ee.ImageCollection("ECMWF/ERA5_LAND/HOURLY")
+                .filterBounds(aoi)
+                .filterDate(start, end)
+                .select(["u_component_of_wind_10m", "v_component_of_wind_10m"])
+                .mean()
+            )
+            wind_stats = gee_client.get_stats(
+                image=era5_wind, aoi=aoi, scale=11000,
+                reducer=ee.Reducer.mean(), max_pixels=1e8,
+            )
+            u = float(wind_stats.get("u_component_of_wind_10m", 0) or 0)
+            v = float(wind_stats.get("v_component_of_wind_10m", 0) or 0)
+            wind_speed_ms: float | None = math.sqrt(u ** 2 + v ** 2)
+        except Exception as era5_exc:
+            log.warning("coastal_outfall.era5_wind_failed", error=str(era5_exc))
+            wind_speed_ms = None
+
+        try:
+            s1_for_sheen = (
+                ee.ImageCollection("COPERNICUS/S1_GRD")
+                .filterBounds(aoi)
+                .filterDate(start, end)
+                .filter(ee.Filter.eq("instrumentMode", "IW"))
+                .filter(ee.Filter.listContains("transmitterReceiverPolarisation", "VV"))
+            )
+            oil_mask, oil_sheen_diagnostics = sar_oil_sheen_mask(s1_for_sheen, aoi, wind_speed_ms)
+            if oil_mask is not None:
+                oil_area_stats = gee_client.get_stats(
+                    image=ee.Image.pixelArea().updateMask(oil_mask).divide(1e6)
+                        .rename("oil_sheen_km2"),
+                    aoi=aoi, scale=10, reducer=ee.Reducer.sum(), max_pixels=1e10,
+                )
+                oil_sheen_km2 = round(float(oil_area_stats.get("oil_sheen_km2") or 0), 4)
+        except Exception as sar_exc:
+            log.warning("coastal_outfall.sar_oil_sheen_error", error=str(sar_exc))
+            oil_sheen_diagnostics["skip_reason"] = str(sar_exc)
+
         # --- Dispersion bearing: plume centroid vs. outfall anchor ---
         bearing_deg = self._dispersion_bearing(plume_mask, aoi, outfall_point)
 
@@ -263,6 +308,9 @@ class CoastalOutfallProcessor(BaseThemeProcessor):
                 "water_area_km2": round(water_area_km2, 4),
                 "tidal_stage": "unknown",
                 "cloud_threshold_used": cloud_threshold_used,
+                # SAR oil-sheen stats — independent of SPM/CDOM pipeline
+                "oil_sheen_km2": oil_sheen_km2,
+                "oil_sheen_diagnostics": oil_sheen_diagnostics,
                 **thermal_result,
                 "caveats": [
                     "SPM/CDOM are relative proxies using generic global calibration "
@@ -271,6 +319,8 @@ class CoastalOutfallProcessor(BaseThemeProcessor):
                     "penalty is applied until a tide-gauge/model API is available.",
                     "Dispersion bearing assumes AOI centroid as outfall anchor unless "
                     "an explicit outfall_point property is supplied on the AOI.",
+                    "SAR oil-sheen detection requires wind speed >= 3 m/s to distinguish "
+                    "oil films from naturally calm water; see oil_sheen_diagnostics.wind_gate_passed.",
                 ],
             },
             anomaly_score=round(anomaly_score, 2),
