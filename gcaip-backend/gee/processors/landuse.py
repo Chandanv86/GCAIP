@@ -65,6 +65,7 @@ class LandUseProcessor(BaseThemeProcessor):
         self, aoi: "ee.Geometry", start_date: str, end_date: str
     ) -> ThemeResult:
         end = date.fromisoformat(end_date)
+        tidal_zone_widen_capped = False  # may be set True in the 30d->90d widen check below
 
         # ── Current: Dynamic World 10-day majority composite ─────────────────
         def _dw_col(s: str, e: str):
@@ -94,12 +95,36 @@ class LandUseProcessor(BaseThemeProcessor):
                 dw_count = dw_current.size().getInfo()
 
                 if dw_count == 0:
-                    # Widen +90 days — covers persistent cloud-cover seasons in
-                    # equatorial/tropical regions (Niger Delta, Congo, SE Asia)
-                    w90_start = (start_dt - timedelta(days=90)).isoformat()
-                    log.info("landuse.fallback_dw_widen_90d", start=w90_start, end=end_date)
-                    dw_current = _dw_col(w90_start, end_date)
-                    dw_count = dw_current.size().getInfo()
+                    # Before widening to 90d, check whether this is a tidal/deltaic
+                    # AOI (WorldCover class 90 = wetland, 95 = mangrove). A 90-day
+                    # window mixes multiple tide states and possibly a wet/dry season
+                    # boundary, causing mudflats and cleared mangrove to be over-counted
+                    # as "built" (class 6) in the MODE composite.
+                    # Cap at 30d for tidal zones to avoid this classification artefact.
+                    _wc = ee.ImageCollection("ESA/WorldCover/v200").first().select("Map")
+                    _tidal_stats = gee_client.get_stats(
+                        image=_wc.eq(90).Or(_wc.eq(95)).rename("tidal_frac"),
+                        aoi=aoi, scale=100, reducer=ee.Reducer.mean(), max_pixels=1e9,
+                    )
+                    _tidal_frac = float(_tidal_stats.get("tidal_frac") or 0.0)
+                    tidal_zone_widen_capped = _tidal_frac > 0.10
+
+                    if tidal_zone_widen_capped:
+                        # Tidal/mangrove AOI: cap widening at 30d already done above;
+                        # do NOT widen to 90d — return with dw_count==0 to fall through
+                        # to the ESA WorldCover static fallback.
+                        log.info(
+                            "landuse.tidal_zone_widen_capped",
+                            tidal_frac=round(_tidal_frac, 3),
+                            reason="WorldCover wetland/mangrove >10%; 90d window suppressed",
+                        )
+                        # Fall through to ESA WorldCover static fallback (dw_count==0 path)
+                    else:
+                        # Non-tidal zone: widen +90 days as before
+                        w90_start = (start_dt - timedelta(days=90)).isoformat()
+                        log.info("landuse.fallback_dw_widen_90d", start=w90_start, end=end_date)
+                        dw_current = _dw_col(w90_start, end_date)
+                        dw_count = dw_current.size().getInfo()
 
                     if dw_count == 0:
                         # All Dynamic World tiers exhausted: fall back to ESA WorldCover
@@ -143,6 +168,7 @@ class LandUseProcessor(BaseThemeProcessor):
             confidence = 0.30  # static ESA WorldCover — no change detection possible
         else:
             confidence = min(1.0, 0.6 + dw_count * 0.05)
+            tidal_zone_widen_capped = False
 
         # ── Baseline: ESA WorldCover v200 (2021) ─────────────────────────────
         esa_baseline = (
@@ -166,7 +192,18 @@ class LandUseProcessor(BaseThemeProcessor):
         tree_to_built = esa_remapped.eq(1).And(current_label.eq(6))
         tree_to_crops = esa_remapped.eq(1).And(current_label.eq(4))
         wetland_to_bare = esa_remapped.eq(3).And(current_label.eq(7))
-        natural_to_built = esa_remapped.lte(3).And(current_label.eq(6))
+
+        # Exclude wetland/mangrove-ORIGIN pixels from natural_to_built to avoid
+        # counting tidal geomorphology as "urban expansion" in deltaic AOIs.
+        # Track the excluded area separately (wetland_to_built_ha) -- never silently
+        # discard the signal, just correctly label it.
+        esa_is_wetland_or_mangrove = esa_baseline.eq(90).Or(esa_baseline.eq(95))
+        natural_to_built = (
+            esa_remapped.lte(3)
+            .And(current_label.eq(6))
+            .And(esa_is_wetland_or_mangrove.Not())
+        )
+        wetland_to_built = esa_is_wetland_or_mangrove.And(current_label.eq(6))
 
         def area_ha(mask: "ee.Image") -> float:
             s = gee_client.get_stats(
@@ -178,7 +215,8 @@ class LandUseProcessor(BaseThemeProcessor):
         tree_to_built_ha = area_ha(tree_to_built)
         tree_to_crops_ha = area_ha(tree_to_crops)
         wetland_to_bare_ha = area_ha(wetland_to_bare)
-        total_natural_to_built = area_ha(natural_to_built)
+        wetland_to_built_ha = area_ha(wetland_to_built)   # NEW: tracked separately, not discarded
+        total_natural_to_built = area_ha(natural_to_built)  # excludes wetland/mangrove origin
         changed_area_ha = tree_to_built_ha + tree_to_crops_ha + wetland_to_bare_ha
 
         # ── Hansen GFW forest loss layer ──────────────────────────────────────
@@ -232,6 +270,7 @@ class LandUseProcessor(BaseThemeProcessor):
                     "tree_to_crops_ha": round(tree_to_crops_ha, 1),
                     "wetland_to_bare_ha": round(wetland_to_bare_ha, 1),
                     "natural_to_built_ha": round(total_natural_to_built, 1),
+                    "wetland_to_built_ha": round(wetland_to_built_ha, 1),
                 },
                 "deforestation_ha": round(deforestation_ha, 1),
                 "urban_expansion_ha": round(tree_to_built_ha, 1),
@@ -241,6 +280,7 @@ class LandUseProcessor(BaseThemeProcessor):
                     if runoff_increase_pct > 5 else "Minimal catchment impact"
                 ),
                 "dw_scene_count": dw_count,
+                "tidal_zone_widen_capped": tidal_zone_widen_capped,
             },
             anomaly_score=round(anomaly_score, 1),
             confidence=round(confidence, 2),
